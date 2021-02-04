@@ -549,18 +549,18 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 			if len(args) != 1 {
 				panic("bad Tj operator")
 			}
-			showText(args[0].RawString())
+			showText(" " + args[0].RawString())
 		case "TJ": // show text, allowing individual glyph positioning
 			v := args[0]
 			for i := 0; i < v.Len(); i++ {
 				x := v.Index(i)
 				if x.Kind() == String {
-					showText(x.RawString())
+					showText(" " + x.RawString())
 				}
 			}
 		}
 	})
-	return textBuilder.String(), nil
+	return strings.TrimSpace(textBuilder.String()), nil
 }
 
 // Column represents the contents of a column
