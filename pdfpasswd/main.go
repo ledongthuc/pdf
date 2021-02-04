@@ -72,7 +72,7 @@ func main() {
 		if err == pdf.ErrInvalidPassword {
 			log.Fatal("password not found")
 		}
-		log.Fatal("reading pdf: %v", err)
+		log.Fatalf("reading pdf: %v\n", err)
 	}
 	fmt.Printf("password: %q\n", last)
 }

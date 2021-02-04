@@ -524,6 +524,8 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		switch op {
 		default:
 			return
+		case "BT": // add a space between text objects
+			showText(" ")
 		case "T*": // move to start of next line
 			showText("\n")
 		case "Tf": // set text font and size
@@ -549,18 +551,18 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 			if len(args) != 1 {
 				panic("bad Tj operator")
 			}
-			showText(" " + args[0].RawString())
+			showText(args[0].RawString())
 		case "TJ": // show text, allowing individual glyph positioning
 			v := args[0]
 			for i := 0; i < v.Len(); i++ {
 				x := v.Index(i)
 				if x.Kind() == String {
-					showText(" " + x.RawString())
+					showText(x.RawString())
 				}
 			}
 		}
 	})
-	return strings.TrimSpace(textBuilder.String()), nil
+	return textBuilder.String(), nil
 }
 
 // Column represents the contents of a column
