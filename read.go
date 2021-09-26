@@ -129,7 +129,7 @@ func NewReader(f io.ReaderAt, size int64) (*Reader, error) {
 func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
 	buf := make([]byte, 10)
 	f.ReadAt(buf, 0)
-	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' {
+	if hasValidPrefix(buf) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' {
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
 	end := size
@@ -189,6 +189,10 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		}
 	}
 	return nil, err
+}
+
+func hasValidPrefix(buf []byte) bool {
+    return bytes.HasPrefix(buf, []byte("%PDF-1.")) || bytes.HasPrefix(buf, []byte("%PDF-1.2")) || bytes.HasPrefix(buf, []byte("%PDF-1.3"))
 }
 
 // Trailer returns the file's Trailer value.
