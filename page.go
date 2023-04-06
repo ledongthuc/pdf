@@ -341,7 +341,7 @@ Parse:
 			}
 		}
 		if DebugOn {
-			println("no code space found")
+			// println("no code space found")
 		}
 		r = append(r, noRune)
 		raw = raw[1:]
@@ -520,7 +520,6 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		for i := n - 1; i >= 0; i-- {
 			args[i] = stk.Pop()
 		}
-
 		switch op {
 		default:
 			return
@@ -803,7 +802,11 @@ func (p Page) Content() Content {
 			}
 
 			Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
-			text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
+			if s == " " || s == "\n" {
+				text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], 0, s})
+			} else {
+				text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
+			}
 
 			tx := w0/1000*g.Tfs + g.Tc
 			tx *= g.Th
@@ -874,7 +877,8 @@ func (p Page) Content() Content {
 			g.Tlm = g.Tm
 
 		case "ET": // end text
-
+			// generate space
+			showText(" ")
 		case "T*": // move to start of next line
 			x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -g.Tl, 1}}
 			g.Tlm = x.mul(g.Tlm)
