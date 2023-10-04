@@ -493,7 +493,8 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		}
 	}()
 
-	strm := p.V.Key("Contents")
+	strm := p.contentStream()
+
 	var enc TextEncoding = &nopEncoder{}
 
 	if fonts == nil {
@@ -708,7 +709,7 @@ func (p Page) GetTextByRow() (Rows, error) {
 }
 
 func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s string)) {
-	strm := p.V.Key("Contents")
+	strm := p.contentStream()
 
 	fonts := make(map[string]*Font)
 	for _, font := range p.Fonts() {
@@ -778,7 +779,7 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 
 // Content returns the page's content.
 func (p Page) Content() Content {
-	strm := p.V.Key("Contents")
+	strm := p.contentStream()
 	var enc TextEncoding = &nopEncoder{}
 
 	var g = gstate{
@@ -996,6 +997,24 @@ func (p Page) Content() Content {
 		}
 	})
 	return Content{text, rect}
+}
+
+func (p Page) contentStream() Value {
+	strm := p.V.Key("Contents")
+
+	// There are simple cases, in which the Contents key holds an array with
+	// a single value, we can deal with that. If it contains multiple
+	// arrays, we would need to concatenate the streams and this is
+	// something we do not yet support.
+	if rr, ok := strm.data.(array); ok {
+		if len(rr) == 1 {
+			strm = p.V.r.resolve(p.V.ptr, rr[0])
+		} else {
+			panic("PDF page contains multiple streams in Contents key, this is not yet supported")
+		}
+	}
+
+	return strm
 }
 
 // TextVertical implements sort.Interface for sorting
