@@ -19,6 +19,12 @@ type Page struct {
 	V Value
 }
 
+maxX := 0.0
+maxY := 0.0
+minX := float64.Max()
+minY := float64.Max()
+	
+
 // Page returns the page for the given page number.
 // Page numbers are indexed starting at 1, not 0.
 // If the page is not found, Page returns a Page with p.V.IsNull().
@@ -486,7 +492,7 @@ type gstate struct {
 
 // GetPlainText returns the page's all text without format.
 // fonts can be passed in (to improve parsing performance) or left nil
-func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
+func (p Page) GetPlainText(fonts map[string]*Font) (result string,x float64, y float64 ,err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = ""
@@ -561,7 +567,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 			}
 		}
 	})
-	return textBuilder.String(), nil
+	return textBuilder.String(),(maxX - minX),(maxY - minY), nil
 }
 
 // Column represents the contents of a column
@@ -719,6 +725,8 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 
 	var enc TextEncoding = &nopEncoder{}
 	var currentX, currentY float64
+	var maxCurrentX, maxCurrentY float64
+	var minCurrentX, minCurrentY float64
 	Interpret(strm, func(stk *Stack, op string) {
 		n := stk.Len()
 		args := make([]Value, n)
@@ -773,6 +781,18 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 		case "Tm":
 			currentX = args[4].Float64()
 			currentY = args[5].Float64()
+			if currentX > maxX {
+				maxX = currentX
+			}
+			if currentX < minX {
+				minX = currentX
+			}
+			if currentY > maxY {
+				maxY = currentY
+			}
+			if currentY < minY {
+				minY = currentY
+			}
 		}
 	})
 }
