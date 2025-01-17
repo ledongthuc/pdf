@@ -419,6 +419,10 @@ func (b *buffer) readObject() object {
 			return b.readDict()
 		case "[":
 			return b.readArray()
+		case ">>":
+			return nil
+		case "]":
+			return nil
 		}
 		b.errorf("unexpected keyword %q parsing object", kw)
 		return nil
@@ -467,6 +471,12 @@ func (b *buffer) readArray() object {
 		if tok == nil || tok == keyword("]") {
 			break
 		}
+
+		// Check EOF
+		if err, ok := tok.(error); ok && err == io.EOF {
+			break
+		}
+
 		b.unreadToken(tok)
 		x = append(x, b.readObject())
 	}
@@ -480,6 +490,12 @@ func (b *buffer) readDict() object {
 		if tok == nil || tok == keyword(">>") {
 			break
 		}
+
+		// Check EOF
+		if err, ok := tok.(error); ok && err == io.EOF {
+			break
+		}
+
 		n, ok := tok.(name)
 		if !ok {
 			b.errorf("unexpected non-name key %T(%v) parsing dictionary", tok, tok)
