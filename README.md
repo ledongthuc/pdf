@@ -7,6 +7,17 @@ A simple Go library which enables reading PDF files. Forked from https://github.
 Features
   - Get plain text content (without format)
   - Get Content (including all font and formatting information)
+## DEBUG
+
+```go
+// string(b.r.Reader.r.buf) corresponds to the PDF content.
+// b.r.Reader.r.w correspond to the PDF content length and can be searched directly
+// string(b.r.Reader.decompressor.dict.hist) is the decompressed PDF stream
+// b.tmp and tok is the keyword
+//(*b).pos +1 is the current read position
+
+// strm.ptr.id is the object id example:xx 0 obj
+```
 
 ## Install:
 
