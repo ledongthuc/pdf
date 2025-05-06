@@ -525,6 +525,8 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		switch op {
 		default:
 			return
+		case "BT": // add a space between text objects
+			showText(" ")
 		case "T*": // move to start of next line
 			showText("\n")
 		case "Tf": // set text font and size
