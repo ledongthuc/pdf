@@ -644,9 +644,8 @@ type Row struct {
 type Rows []*Row
 
 // GetTextByRow returns the page's all text grouped by rows
-func (p Page) GetTextByRow() (Rows, error) {
-	result := Rows{}
-	var err error
+func (p Page) GetTextByRow() (result Rows, err error) {
+	result = Rows{}
 
 	defer func() {
 		if r := recover(); r != nil {

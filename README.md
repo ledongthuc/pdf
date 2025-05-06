@@ -136,3 +136,11 @@ func readPdf(path string) (string, error) {
 
 ## Demo
 ![Run example](https://i.gyazo.com/01fbc539e9872593e0ff6bac7e954e6d.gif)
+
+## References
+
+List of useful references to how the PDF file format is structured:
+
+* https://web.archive.org/web/20210128014024/https://www.adobe.com/content/dam/acom/en/devnet/pdf/PDF32000_2008.pdf
+* https://www.oreilly.com/library/view/pdf-explained/9781449321581/ch04.html
+* https://commandlinefanatic.com/cgi-bin/showarticle.cgi?article=art019
