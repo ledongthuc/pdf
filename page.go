@@ -254,6 +254,17 @@ type cmap struct {
 	bfchar  []bfchar
 }
 
+// bytesToPUA converts raw bytes to Private Use Area runes (U+E000-U+E0FF).
+// This preserves the original byte values for post-processing instead of
+// replacing them with U+FFFD which loses the information entirely.
+func bytesToPUA(s string) []rune {
+	runes := make([]rune, len(s))
+	for i := 0; i < len(s); i++ {
+		runes[i] = rune(0xE000 + int(s[i]))
+	}
+	return runes
+}
+
 func (m *cmap) Decode(raw string) (text string) {
 	var r []rune
 Parse:
@@ -297,11 +308,11 @@ Parse:
 									fmt.Printf("unknown dst %v\n", bfrange.dst)
 								}
 							}
-							r = append(r, noRune)
+							r = append(r, bytesToPUA(text)...)
 							continue Parse
 						}
 					}
-					r = append(r, noRune)
+					r = append(r, bytesToPUA(text)...)
 					continue Parse
 				}
 			}
@@ -309,7 +320,7 @@ Parse:
 		if DebugOn {
 			println("no code space found")
 		}
-		r = append(r, noRune)
+		r = append(r, rune(0xE000+int(raw[0])))
 		raw = raw[1:]
 	}
 	return string(r)
