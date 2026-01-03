@@ -231,7 +231,7 @@ func (f Font) getEncoder() TextEncoding {
 			return &byteEncoder{&pdfDocEncoding}
 		}
 	case Dict:
-		return &dictEncoder{enc.Key("Differences")}
+		return newDictEncoder(enc)
 	case Null:
 		return &byteEncoder{&pdfDocEncoding}
 	default:
@@ -242,33 +242,62 @@ func (f Font) getEncoder() TextEncoding {
 	}
 }
 
+// dictEncoder handles fonts with Encoding dictionaries containing
+// BaseEncoding and/or Differences arrays per PDF spec section 9.6.6.
 type dictEncoder struct {
-	v Value
+	table [256]rune // combined encoding table
+}
+
+// newDictEncoder creates an encoder from an Encoding dictionary.
+// It first applies BaseEncoding (defaulting to StandardEncoding/PDFDocEncoding),
+// then overlays any Differences.
+func newDictEncoder(enc Value) *dictEncoder {
+	e := &dictEncoder{}
+
+	// Start with base encoding
+	baseEnc := enc.Key("BaseEncoding")
+	var baseTable *[256]rune
+	switch baseEnc.Name() {
+	case "WinAnsiEncoding":
+		baseTable = &winAnsiEncoding
+	case "MacRomanEncoding":
+		baseTable = &macRomanEncoding
+	case "MacExpertEncoding":
+		baseTable = &pdfDocEncoding // fallback
+	default:
+		// Per PDF spec, if BaseEncoding is absent, use the font's built-in
+		// encoding. For simplicity, we use PDFDocEncoding as fallback.
+		baseTable = &pdfDocEncoding
+	}
+	copy(e.table[:], baseTable[:])
+
+	// Apply Differences array on top
+	// Format: [firstCode /name1 /name2 ... nextCode /nameN ...]
+	diff := enc.Key("Differences")
+	if diff.Kind() == Array {
+		code := -1
+		for j := 0; j < diff.Len(); j++ {
+			x := diff.Index(j)
+			if x.Kind() == Integer {
+				code = int(x.Int64())
+				continue
+			}
+			if x.Kind() == Name && code >= 0 && code < 256 {
+				if r := nameToRune[x.Name()]; r != 0 {
+					e.table[code] = r
+				}
+				code++
+			}
+		}
+	}
+
+	return e
 }
 
 func (e *dictEncoder) Decode(raw string) (text string) {
 	r := make([]rune, 0, len(raw))
 	for i := 0; i < len(raw); i++ {
-		ch := rune(raw[i])
-		n := -1
-		for j := 0; j < e.v.Len(); j++ {
-			x := e.v.Index(j)
-			if x.Kind() == Integer {
-				n = int(x.Int64())
-				continue
-			}
-			if x.Kind() == Name {
-				if int(raw[i]) == n {
-					r := nameToRune[x.Name()]
-					if r != 0 {
-						ch = r
-						break
-					}
-				}
-				n++
-			}
-		}
-		r = append(r, ch)
+		r = append(r, e.table[raw[i]])
 	}
 	return string(r)
 }
