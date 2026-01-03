@@ -233,7 +233,11 @@ func (chain *FontEncodingChain) decodeSimple(raw string) string {
 		// Fall back to base encoding
 		r := chain.baseEncoding[code]
 		if r == 0 {
-			r = noRune // Use replacement character
+			// Preserve raw byte in Private Use Area (U+E000-U+E0FF)
+			// This allows post-processing to recover the original byte:
+			// originalByte = rune - 0xE000
+			// This is better than U+FFFD which loses the information entirely.
+			r = rune(0xE000 + int(code))
 		}
 		result.WriteRune(r)
 	}
@@ -271,7 +275,8 @@ func (chain *FontEncodingChain) decodeWithGlyphHeuristics(raw string) string {
 		}
 
 		if r == 0 {
-			r = noRune
+			// Preserve raw byte in PUA for post-processing
+			r = rune(0xE000 + int(code))
 		}
 		result.WriteRune(r)
 	}
@@ -293,10 +298,14 @@ func (chain *FontEncodingChain) isValidDecode(text string) bool {
 		if r == noRune || r == unicode.ReplacementChar {
 			replacementCount++
 		}
+		// Note: PUA characters (U+E000-U+E0FF) are not counted as failures
+		// because they preserve the original byte value for post-processing
 	}
 
-	// Accept if less than 20% replacement characters
-	return totalCount > 0 && float64(replacementCount)/float64(totalCount) < 0.2
+	// Accept if less than 50% replacement characters (raised from 20%)
+	// This allows more text through for post-processing, which can apply
+	// custom decodings (e.g., shifted encodings) to PUA-preserved bytes.
+	return totalCount > 0 && float64(replacementCount)/float64(totalCount) < 0.5
 }
 
 // resolveGlyphName converts a glyph name to its Unicode code point.
