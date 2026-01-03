@@ -200,6 +200,20 @@ func (f Font) Encoder() TextEncoding {
 }
 
 func (f Font) getEncoder() TextEncoding {
+	// Check ToUnicode first - it's the authoritative character mapping
+	// per PDF spec and takes precedence over Encoding
+	toUnicode := f.V.Key("ToUnicode")
+	if toUnicode.Kind() == Stream {
+		if m := readCmap(toUnicode); m != nil {
+			return m
+		}
+		// ToUnicode stream exists but failed to parse - fall through to Encoding
+		if DebugOn {
+			println("ToUnicode stream failed to parse, falling back to Encoding")
+		}
+	}
+
+	// Fall back to Encoding-based decoding
 	enc := f.V.Key("Encoding")
 	switch enc.Kind() {
 	case Name:
@@ -209,36 +223,23 @@ func (f Font) getEncoder() TextEncoding {
 		case "MacRomanEncoding":
 			return &byteEncoder{&macRomanEncoding}
 		case "Identity-H":
-			return f.charmapEncoding()
+			return &byteEncoder{&pdfDocEncoding}
 		default:
 			if DebugOn {
 				println("unknown encoding", enc.Name())
 			}
-			return &nopEncoder{}
+			return &byteEncoder{&pdfDocEncoding}
 		}
 	case Dict:
 		return &dictEncoder{enc.Key("Differences")}
 	case Null:
-		return f.charmapEncoding()
+		return &byteEncoder{&pdfDocEncoding}
 	default:
 		if DebugOn {
 			println("unexpected encoding", enc.String())
 		}
-		return &nopEncoder{}
+		return &byteEncoder{&pdfDocEncoding}
 	}
-}
-
-func (f *Font) charmapEncoding() TextEncoding {
-	toUnicode := f.V.Key("ToUnicode")
-	if toUnicode.Kind() == Stream {
-		m := readCmap(toUnicode)
-		if m == nil {
-			return &nopEncoder{}
-		}
-		return m
-	}
-
-	return &byteEncoder{&pdfDocEncoding}
 }
 
 type dictEncoder struct {
