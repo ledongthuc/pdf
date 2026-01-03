@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 )
@@ -200,106 +201,8 @@ func (f Font) Encoder() TextEncoding {
 }
 
 func (f Font) getEncoder() TextEncoding {
-	// Check ToUnicode first - it's the authoritative character mapping
-	// per PDF spec and takes precedence over Encoding
-	toUnicode := f.V.Key("ToUnicode")
-	if toUnicode.Kind() == Stream {
-		if m := readCmap(toUnicode); m != nil {
-			return m
-		}
-		// ToUnicode stream exists but failed to parse - fall through to Encoding
-		if DebugOn {
-			println("ToUnicode stream failed to parse, falling back to Encoding")
-		}
-	}
-
-	// Fall back to Encoding-based decoding
-	enc := f.V.Key("Encoding")
-	switch enc.Kind() {
-	case Name:
-		switch enc.Name() {
-		case "WinAnsiEncoding":
-			return &byteEncoder{&winAnsiEncoding}
-		case "MacRomanEncoding":
-			return &byteEncoder{&macRomanEncoding}
-		case "Identity-H":
-			return &byteEncoder{&pdfDocEncoding}
-		default:
-			if DebugOn {
-				println("unknown encoding", enc.Name())
-			}
-			return &byteEncoder{&pdfDocEncoding}
-		}
-	case Dict:
-		return newDictEncoder(enc)
-	case Null:
-		return &byteEncoder{&pdfDocEncoding}
-	default:
-		if DebugOn {
-			println("unexpected encoding", enc.String())
-		}
-		return &byteEncoder{&pdfDocEncoding}
-	}
-}
-
-// dictEncoder handles fonts with Encoding dictionaries containing
-// BaseEncoding and/or Differences arrays per PDF spec section 9.6.6.
-type dictEncoder struct {
-	table [256]rune // combined encoding table
-}
-
-// newDictEncoder creates an encoder from an Encoding dictionary.
-// It first applies BaseEncoding (defaulting to StandardEncoding/PDFDocEncoding),
-// then overlays any Differences.
-func newDictEncoder(enc Value) *dictEncoder {
-	e := &dictEncoder{}
-
-	// Start with base encoding
-	baseEnc := enc.Key("BaseEncoding")
-	var baseTable *[256]rune
-	switch baseEnc.Name() {
-	case "WinAnsiEncoding":
-		baseTable = &winAnsiEncoding
-	case "MacRomanEncoding":
-		baseTable = &macRomanEncoding
-	case "MacExpertEncoding":
-		baseTable = &pdfDocEncoding // fallback
-	default:
-		// Per PDF spec, if BaseEncoding is absent, use the font's built-in
-		// encoding. For simplicity, we use PDFDocEncoding as fallback.
-		baseTable = &pdfDocEncoding
-	}
-	copy(e.table[:], baseTable[:])
-
-	// Apply Differences array on top
-	// Format: [firstCode /name1 /name2 ... nextCode /nameN ...]
-	diff := enc.Key("Differences")
-	if diff.Kind() == Array {
-		code := -1
-		for j := 0; j < diff.Len(); j++ {
-			x := diff.Index(j)
-			if x.Kind() == Integer {
-				code = int(x.Int64())
-				continue
-			}
-			if x.Kind() == Name && code >= 0 && code < 256 {
-				if r := nameToRune[x.Name()]; r != 0 {
-					e.table[code] = r
-				}
-				code++
-			}
-		}
-	}
-
-	return e
-}
-
-func (e *dictEncoder) Decode(raw string) (text string) {
-	r := make([]rune, 0, len(raw))
-	for i := 0; i < len(raw); i++ {
-		r = append(r, e.table[raw[i]])
-	}
-	return string(r)
+	// Use the new multi-layer encoding chain for robust decoding
+	return NewFontEncodingChain(f)
 }
 
 // A TextEncoding represents a mapping between
@@ -514,6 +417,39 @@ type Text struct {
 	S        string  // the actual UTF-8 text
 }
 
+// TextMark represents text with full transformation information.
+// This preserves rotation, scaling, and flip information from the PDF.
+type TextMark struct {
+	Text
+	Angle    float64 // rotation angle in degrees (0 = normal, 180 = upside down)
+	ScaleX   float64 // horizontal scale factor (negative = horizontally flipped)
+	ScaleY   float64 // vertical scale factor (negative = vertically flipped)
+	HFlipped bool    // true if text is horizontally mirrored
+	VFlipped bool    // true if text is vertically mirrored
+}
+
+// CharInfo contains information about a single character during text extraction.
+// This is passed to callbacks during content walking.
+type CharInfo struct {
+	Char rune    // The decoded character
+	Font string  // Font name (without subset prefix)
+	X, Y float64 // Position in points
+	W    float64 // Width in points
+	Trm  matrix  // Full text rendering matrix (for computing angle/scale/flip)
+}
+
+// ContentWalkOptions configures the behavior of walkTextContent.
+type ContentWalkOptions struct {
+	// OnChar is called for each character in the content stream.
+	OnChar func(info CharInfo)
+	// OnRect is called for each rectangle in the content stream.
+	// If nil, rectangles are ignored.
+	OnRect func(r Rect)
+	// TrackGraphicsState enables proper q/Q (save/restore) handling.
+	// Required if you need accurate graphics state across the document.
+	TrackGraphicsState bool
+}
+
 // A Rect represents a rectangle.
 type Rect struct {
 	Min, Max Point
@@ -544,6 +480,231 @@ type gstate struct {
 	Tlm   matrix
 	Trm   matrix
 	CTM   matrix
+}
+
+// walkTextContent walks the content stream and calls the provided callbacks
+// for each character and optionally for rectangles. This is the shared
+// implementation used by Content() and ContentWithMarks().
+func (p Page) walkTextContent(opts ContentWalkOptions) {
+	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
+		return
+	}
+	strm := p.V.Key("Contents")
+	var enc TextEncoding = &nopEncoder{}
+
+	var g = gstate{
+		Th:  1,
+		CTM: ident,
+	}
+
+	var gstack []gstate
+
+	showText := func(s string) {
+		n := 0
+		decoded := enc.Decode(s)
+		for _, ch := range decoded {
+			var w0 float64
+			if n < len(s) {
+				w0 = g.Tf.Width(int(s[n]))
+			}
+			n++
+
+			f := g.Tf.BaseFont()
+			if i := strings.Index(f, "+"); i >= 0 {
+				f = f[i+1:]
+			}
+
+			Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
+
+			if opts.OnChar != nil {
+				opts.OnChar(CharInfo{
+					Char: ch,
+					Font: f,
+					X:    Trm[2][0],
+					Y:    Trm[2][1],
+					W:    w0 / 1000 * Trm[0][0],
+					Trm:  Trm,
+				})
+			}
+
+			tx := w0/1000*g.Tfs + g.Tc
+			tx *= g.Th
+			g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
+		}
+	}
+
+	Interpret(strm, func(stk *Stack, op string) {
+		n := stk.Len()
+		args := make([]Value, n)
+		for i := n - 1; i >= 0; i-- {
+			args[i] = stk.Pop()
+		}
+		switch op {
+		default:
+			return
+
+		case "cm": // update CTM
+			if len(args) != 6 {
+				panic("bad cm")
+			}
+			var m matrix
+			for i := 0; i < 6; i++ {
+				m[i/2][i%2] = args[i].Float64()
+			}
+			m[2][2] = 1
+			g.CTM = m.mul(g.CTM)
+
+		case "gs": // set parameters from graphics state resource
+			// Placeholder for graphics state handling
+
+		case "f", "g", "l", "m", "cs", "scn": // graphics operators we ignore
+
+		case "re": // append rectangle to path
+			if opts.OnRect != nil {
+				if len(args) != 4 {
+					panic("bad re")
+				}
+				x, y, w, h := args[0].Float64(), args[1].Float64(), args[2].Float64(), args[3].Float64()
+				opts.OnRect(Rect{Point{x, y}, Point{x + w, y + h}})
+			}
+
+		case "q": // save graphics state
+			if opts.TrackGraphicsState {
+				gstack = append(gstack, g)
+			}
+
+		case "Q": // restore graphics state
+			if opts.TrackGraphicsState && len(gstack) > 0 {
+				n := len(gstack) - 1
+				g = gstack[n]
+				gstack = gstack[:n]
+			}
+
+		case "BT": // begin text (reset text matrix and line matrix)
+			g.Tm = ident
+			g.Tlm = g.Tm
+
+		case "ET": // end text
+
+		case "T*": // move to start of next line
+			x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -g.Tl, 1}}
+			g.Tlm = x.mul(g.Tlm)
+			g.Tm = g.Tlm
+
+		case "Tc": // set character spacing
+			if len(args) != 1 {
+				panic("bad Tc")
+			}
+			g.Tc = args[0].Float64()
+
+		case "TD": // move text position and set leading
+			if len(args) != 2 {
+				panic("bad TD")
+			}
+			g.Tl = -args[1].Float64()
+			fallthrough
+		case "Td": // move text position
+			if len(args) != 2 {
+				panic("bad Td")
+			}
+			tx := args[0].Float64()
+			ty := args[1].Float64()
+			x := matrix{{1, 0, 0}, {0, 1, 0}, {tx, ty, 1}}
+			g.Tlm = x.mul(g.Tlm)
+			g.Tm = g.Tlm
+
+		case "Tf": // set text font and size
+			if len(args) != 2 {
+				panic("bad Tf")
+			}
+			f := args[0].Name()
+			g.Tf = p.Font(f)
+			enc = g.Tf.Encoder()
+			if enc == nil {
+				if DebugOn {
+					println("no cmap for", f)
+				}
+				enc = &nopEncoder{}
+			}
+			g.Tfs = args[1].Float64()
+
+		case "\"": // set spacing, move to next line, and show text
+			if len(args) != 3 {
+				panic("bad \" operator")
+			}
+			g.Tw = args[0].Float64()
+			g.Tc = args[1].Float64()
+			args = args[2:]
+			fallthrough
+		case "'": // move to next line and show text
+			if len(args) != 1 {
+				panic("bad ' operator")
+			}
+			x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -g.Tl, 1}}
+			g.Tlm = x.mul(g.Tlm)
+			g.Tm = g.Tlm
+			fallthrough
+		case "Tj": // show text
+			if len(args) != 1 {
+				panic("bad Tj operator")
+			}
+			showText(args[0].RawString())
+
+		case "TJ": // show text, allowing individual glyph positioning
+			v := args[0]
+			for i := 0; i < v.Len(); i++ {
+				x := v.Index(i)
+				if x.Kind() == String {
+					showText(x.RawString())
+				} else {
+					tx := -x.Float64() / 1000 * g.Tfs * g.Th
+					g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
+				}
+			}
+
+		case "TL": // set text leading
+			if len(args) != 1 {
+				panic("bad TL")
+			}
+			g.Tl = args[0].Float64()
+
+		case "Tm": // set text matrix and line matrix
+			if len(args) != 6 {
+				panic("bad Tm")
+			}
+			var m matrix
+			for i := 0; i < 6; i++ {
+				m[i/2][i%2] = args[i].Float64()
+			}
+			m[2][2] = 1
+			g.Tm = m
+			g.Tlm = m
+
+		case "Tr": // set text rendering mode
+			if len(args) != 1 {
+				panic("bad Tr")
+			}
+			g.Tmode = int(args[0].Int64())
+
+		case "Ts": // set text rise
+			if len(args) != 1 {
+				panic("bad Ts")
+			}
+			g.Trise = args[0].Float64()
+
+		case "Tw": // set word spacing
+			if len(args) != 1 {
+				panic("bad Tw")
+			}
+			g.Tw = args[0].Float64()
+
+		case "Tz": // set horizontal text scaling
+			if len(args) != 1 {
+				panic("bad Tz")
+			}
+			g.Th = args[0].Float64() / 100
+		}
+	})
 }
 
 // GetPlainText returns the page's all text without format.
@@ -857,228 +1018,76 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 
 // Content returns the page's content.
 func (p Page) Content() Content {
-	// Handle in case the content page is empty
-	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
-		return Content{}
-	}
-	strm := p.V.Key("Contents")
-	var enc TextEncoding = &nopEncoder{}
-
-	var g = gstate{
-		Th:  1,
-		CTM: ident,
-	}
-
 	var text []Text
-	showText := func(s string) {
-		n := 0
-		decoded := enc.Decode(s)
-		for _, ch := range decoded {
-			var w0 float64
-			if n < len(s) {
-				w0 = g.Tf.Width(int(s[n]))
-			}
-			n++
-
-			f := g.Tf.BaseFont()
-			if i := strings.Index(f, "+"); i >= 0 {
-				f = f[i+1:]
-			}
-
-			Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
-			text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
-
-			tx := w0/1000*g.Tfs + g.Tc
-			tx *= g.Th
-			g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
-		}
-	}
-
 	var rect []Rect
-	var gstack []gstate
-	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
-		switch op {
-		default:
-			// if DebugOn {
-			// 	fmt.Println(op, args)
-			// }
-			return
 
-		case "cm": // update g.CTM
-			if len(args) != 6 {
-				panic("bad g.Tm")
-			}
-			var m matrix
-			for i := 0; i < 6; i++ {
-				m[i/2][i%2] = args[i].Float64()
-			}
-			m[2][2] = 1
-			g.CTM = m.mul(g.CTM)
-
-		case "gs": // set parameters from graphics state resource
-			//gs := p.Resources().Key("ExtGState").Key(args[0].Name())
-			//font := gs.Key("Font")
-			//if font.Kind() == Array && font.Len() == 2 {
-			// if DebugOn {
-			// 	fmt.Println("FONT", font)
-			// }
-			//}
-
-		case "f": // fill
-		case "g": // setgray
-		case "l": // lineto
-		case "m": // moveto
-
-		case "cs": // set colorspace non-stroking
-		case "scn": // set color non-stroking
-
-		case "re": // append rectangle to path
-			if len(args) != 4 {
-				panic("bad re")
-			}
-			x, y, w, h := args[0].Float64(), args[1].Float64(), args[2].Float64(), args[3].Float64()
-			rect = append(rect, Rect{Point{x, y}, Point{x + w, y + h}})
-
-		case "q": // save graphics state
-			gstack = append(gstack, g)
-
-		case "Q": // restore graphics state
-			n := len(gstack) - 1
-			g = gstack[n]
-			gstack = gstack[:n]
-
-		case "BT": // begin text (reset text matrix and line matrix)
-			g.Tm = ident
-			g.Tlm = g.Tm
-
-		case "ET": // end text
-
-		case "T*": // move to start of next line
-			x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -g.Tl, 1}}
-			g.Tlm = x.mul(g.Tlm)
-			g.Tm = g.Tlm
-
-		case "Tc": // set character spacing
-			if len(args) != 1 {
-				panic("bad g.Tc")
-			}
-			g.Tc = args[0].Float64()
-
-		case "TD": // move text position and set leading
-			if len(args) != 2 {
-				panic("bad Td")
-			}
-			g.Tl = -args[1].Float64()
-			fallthrough
-		case "Td": // move text position
-			if len(args) != 2 {
-				panic("bad Td")
-			}
-			tx := args[0].Float64()
-			ty := args[1].Float64()
-			x := matrix{{1, 0, 0}, {0, 1, 0}, {tx, ty, 1}}
-			g.Tlm = x.mul(g.Tlm)
-			g.Tm = g.Tlm
-
-		case "Tf": // set text font and size
-			if len(args) != 2 {
-				panic("bad TL")
-			}
-			f := args[0].Name()
-			g.Tf = p.Font(f)
-			enc = g.Tf.Encoder()
-			if enc == nil {
-				if DebugOn {
-					println("no cmap for", f)
-				}
-				enc = &nopEncoder{}
-			}
-			g.Tfs = args[1].Float64()
-
-		case "\"": // set spacing, move to next line, and show text
-			if len(args) != 3 {
-				panic("bad \" operator")
-			}
-			g.Tw = args[0].Float64()
-			g.Tc = args[1].Float64()
-			args = args[2:]
-			fallthrough
-		case "'": // move to next line and show text
-			if len(args) != 1 {
-				panic("bad ' operator")
-			}
-			x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -g.Tl, 1}}
-			g.Tlm = x.mul(g.Tlm)
-			g.Tm = g.Tlm
-			fallthrough
-		case "Tj": // show text
-			if len(args) != 1 {
-				panic("bad Tj operator")
-			}
-			showText(args[0].RawString())
-
-		case "TJ": // show text, allowing individual glyph positioning
-			v := args[0]
-			for i := 0; i < v.Len(); i++ {
-				x := v.Index(i)
-				if x.Kind() == String {
-					showText(x.RawString())
-				} else {
-					tx := -x.Float64() / 1000 * g.Tfs * g.Th
-					g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
-				}
-			}
-			showText("\n")
-
-		case "TL": // set text leading
-			if len(args) != 1 {
-				panic("bad TL")
-			}
-			g.Tl = args[0].Float64()
-
-		case "Tm": // set text matrix and line matrix
-			if len(args) != 6 {
-				panic("bad g.Tm")
-			}
-			var m matrix
-			for i := 0; i < 6; i++ {
-				m[i/2][i%2] = args[i].Float64()
-			}
-			m[2][2] = 1
-			g.Tm = m
-			g.Tlm = m
-
-		case "Tr": // set text rendering mode
-			if len(args) != 1 {
-				panic("bad Tr")
-			}
-			g.Tmode = int(args[0].Int64())
-
-		case "Ts": // set text rise
-			if len(args) != 1 {
-				panic("bad Ts")
-			}
-			g.Trise = args[0].Float64()
-
-		case "Tw": // set word spacing
-			if len(args) != 1 {
-				panic("bad g.Tw")
-			}
-			g.Tw = args[0].Float64()
-
-		case "Tz": // set horizontal text scaling
-			if len(args) != 1 {
-				panic("bad Tz")
-			}
-			g.Th = args[0].Float64() / 100
-		}
+	p.walkTextContent(ContentWalkOptions{
+		OnChar: func(info CharInfo) {
+			text = append(text, Text{
+				Font:     info.Font,
+				FontSize: info.Trm[0][0],
+				X:        info.X,
+				Y:        info.Y,
+				W:        info.W,
+				S:        string(info.Char),
+			})
+		},
+		OnRect: func(r Rect) {
+			rect = append(rect, r)
+		},
+		TrackGraphicsState: true,
 	})
+
 	return Content{text, rect}
+}
+
+// ContentWithMarks returns the page's content with full transformation info.
+// This preserves rotation angles and flip status for each text element.
+func (p Page) ContentWithMarks() []TextMark {
+	var marks []TextMark
+
+	p.walkTextContent(ContentWalkOptions{
+		OnChar: func(info CharInfo) {
+			// Extract transformation components from Trm matrix
+			// Matrix is [a b 0; c d 0; e f 1]
+			a, b := info.Trm[0][0], info.Trm[0][1]
+			c, d := info.Trm[1][0], info.Trm[1][1]
+
+			// Calculate rotation angle in degrees
+			angle := 0.0
+			if a != 0 || b != 0 {
+				angle = math.Atan2(b, a) * 180 / math.Pi
+			}
+
+			// Calculate scale factors
+			scaleX := math.Sqrt(a*a + b*b)
+			scaleY := math.Sqrt(c*c + d*d)
+
+			// Detect flips: determinant < 0 means reflection
+			det := a*d - b*c
+			hFlipped := det < 0
+			vFlipped := d < 0 && det > 0
+
+			marks = append(marks, TextMark{
+				Text: Text{
+					Font:     info.Font,
+					FontSize: info.Trm[0][0],
+					X:        info.X,
+					Y:        info.Y,
+					W:        info.W,
+					S:        string(info.Char),
+				},
+				Angle:    angle,
+				ScaleX:   scaleX,
+				ScaleY:   scaleY,
+				HFlipped: hFlipped,
+				VFlipped: vFlipped,
+			})
+		},
+		TrackGraphicsState: false,
+	})
+
+	return marks
 }
 
 // TextVertical implements sort.Interface for sorting
