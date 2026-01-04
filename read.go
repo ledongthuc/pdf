@@ -806,8 +806,14 @@ func (v Value) Reader() io.ReadCloser {
 	if !ok {
 		return &errorReadCloser{fmt.Errorf("stream not present")}
 	}
+	streamLen := v.Key("Length").Int64()
+	// Handle empty streams - return empty reader without applying filters.
+	// This avoids zlib "unexpected EOF" errors on 0-length FlateDecode streams.
+	if streamLen == 0 {
+		return ioutil.NopCloser(bytes.NewReader(nil))
+	}
 	var rd io.Reader
-	rd = io.NewSectionReader(v.r.f, x.offset, v.Key("Length").Int64())
+	rd = io.NewSectionReader(v.r.f, x.offset, streamLen)
 	if v.r.key != nil {
 		rd = decryptStream(v.r.key, v.r.useAES, x.ptr, rd)
 	}
