@@ -719,7 +719,9 @@ func (p Page) walkTextContent(opts ContentWalkOptions) {
 }
 
 // GetPlainText returns the page's all text without format.
-// fonts can be passed in (to improve parsing performance) or left nil
+// fonts can be passed in (to improve parsing performance) or left nil.
+// Uses position-based word boundary detection to insert spaces between words
+// even when the PDF doesn't contain explicit space characters.
 func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -732,80 +734,66 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return "", nil
 	}
-	strm := p.V.Key("Contents")
-	var enc TextEncoding = &nopEncoder{}
-
-	if fonts == nil {
-		fonts = make(map[string]*Font)
-		for _, font := range p.Fonts() {
-			f := p.Font(font)
-			fonts[font] = &f
-		}
-	}
 
 	var textBuilder bytes.Buffer
-	showText := func(s string) {
-		textBuilder.WriteString(s)
-	}
-	showEncodedText := func(s string) {
-		for _, ch := range enc.Decode(s) {
-			_, err := textBuilder.WriteRune(ch)
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
+	var prevY, prevEndX float64
+	var prevFontSize float64
+	first := true
 
-	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
-
-		switch op {
-		default:
-			// Easier debug
-			// fmt.Println("<DEBUG><op>", op, "</op><args>", args, "</args>")
-			return
-		case "BT": // add a space between text objects
-			showText("\n")
-		case "T*": // move to start of next line
-			showEncodedText("\n")
-		case "Tf": // set text font and size
-			if len(args) != 2 {
-				panic("bad TL")
+	p.walkTextContent(ContentWalkOptions{
+		OnChar: func(info CharInfo) {
+			fontSize := info.Trm[0][0]
+			if fontSize < 0 {
+				fontSize = -fontSize
 			}
-			if font, ok := fonts[args[0].Name()]; ok {
-				enc = font.Encoder()
+			if fontSize == 0 {
+				fontSize = 12 // default font size
+			}
+
+			if first {
+				first = false
 			} else {
-				enc = &nopEncoder{}
-			}
-		case "\"": // set spacing, move to next line, and show text
-			if len(args) != 3 {
-				panic("bad \" operator")
-			}
-			fallthrough
-		case "'": // move to next line and show text
-			if len(args) != 1 {
-				panic("bad ' operator")
-			}
-			fallthrough
-		case "Tj": // show text
-			if len(args) != 1 {
-				panic("bad Tj operator")
-			}
-			showEncodedText(args[0].RawString())
-		case "TJ": // show text, allowing individual glyph positioning
-			v := args[0]
-			for i := 0; i < v.Len(); i++ {
-				x := v.Index(i)
-				if x.Kind() == String {
-					showEncodedText(x.RawString())
+				// Detect line break: Y position changed significantly
+				// Use font size as threshold for what counts as a new line
+				yThreshold := prevFontSize * 0.5
+				if yThreshold < 3 {
+					yThreshold = 3
+				}
+				yDiff := prevY - info.Y // PDF Y increases upward
+				if yDiff < 0 {
+					yDiff = -yDiff
+				}
+
+				if yDiff > yThreshold {
+					// New line
+					textBuilder.WriteByte('\n')
+				} else {
+					// Same line - check for word gap
+					// MuPDF approach: use character width as reference
+					// A gap larger than ~20% of character width indicates a space
+					charWidth := info.W
+					if charWidth < 1 {
+						charWidth = prevFontSize * 0.5 // fallback
+					}
+					spaceThreshold := charWidth * 0.2
+					if spaceThreshold < 0.5 {
+						spaceThreshold = 0.5
+					}
+
+					gap := info.X - prevEndX
+					if gap > spaceThreshold {
+						textBuilder.WriteByte(' ')
+					}
 				}
 			}
-		}
+
+			textBuilder.WriteRune(info.Char)
+			prevY = info.Y
+			prevEndX = info.X + info.W
+			prevFontSize = fontSize
+		},
 	})
+
 	return textBuilder.String(), nil
 }
 
