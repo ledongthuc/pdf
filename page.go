@@ -257,7 +257,14 @@ type cmap struct {
 // bytesToPUA converts raw bytes to Private Use Area runes (U+E000-U+E0FF).
 // This preserves the original byte values for post-processing instead of
 // replacing them with U+FFFD which loses the information entirely.
+// For 2-byte CID font codes where the high byte is 0x00, only the low byte
+// is converted to avoid interleaved nulls that break shift detection.
 func bytesToPUA(s string) []rune {
+	// For 2-byte codes with null high byte, use only the low byte
+	// This matches PyMuPDF's handling of CID fonts
+	if len(s) == 2 && s[0] == 0 {
+		return []rune{rune(0xE000 + int(s[1]))}
+	}
 	runes := make([]rune, len(s))
 	for i := 0; i < len(s); i++ {
 		runes[i] = rune(0xE000 + int(s[i]))
