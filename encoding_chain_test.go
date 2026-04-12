@@ -110,10 +110,12 @@ func TestFontEncodingChain_isValidDecode(t *testing.T) {
 		{"empty string", "", false},
 		{"all valid ASCII", "Hello World", true},
 		{"all valid Unicode", "Hello World", true},
-		// Threshold is < 20% (strictly less than)
-		{"under threshold", string([]rune{'H', 'e', 'l', 'l', 'o', noRune}), true}, // 1/6 = 16.7%
-		{"at threshold", string([]rune{'H', noRune, 'l', 'l', 'o'}), false},        // 1/5 = 20% (not < 20%)
-		{"over threshold", string([]rune{noRune, noRune, 'l', 'l', 'o'}), false},   // 2/5 = 40%
+		// Threshold is < 50% (strictly less than)
+		{"under threshold", string([]rune{'H', 'e', 'l', 'l', 'o', noRune}), true},          // 1/6 = 16.7%
+		{"at threshold", string([]rune{'H', noRune, 'l', 'l', 'o'}), true},                  // 1/5 = 20% (< 50%)
+		{"just under 50%", string([]rune{noRune, noRune, 'l', 'l', 'o'}), true},              // 2/5 = 40% (< 50%)
+		{"at 50%", string([]rune{noRune, noRune, noRune, 'l', 'l', 'o'}), false},             // 3/6 = 50% (not < 50%)
+		{"over threshold", string([]rune{noRune, noRune, noRune, noRune, 'o'}), false},       // 4/5 = 80%
 		{"all replacements", string([]rune{noRune, noRune, noRune}), false},
 		{"single char valid", "A", true},
 		{"single char invalid", string(noRune), false},
@@ -284,11 +286,228 @@ func TestFontEncodingChain_decodeWithGlyphHeuristics(t *testing.T) {
 	}
 }
 
+func TestResolveGlyphNameMulti(t *testing.T) {
+	tests := []struct {
+		name string
+		want []rune
+	}{
+		// Single-rune: standard names resolve via resolveGlyphName
+		{"A", []rune{'A'}},
+		{"space", []rune{' '}},
+		{"onehalf", []rune{'½'}},
+		{"onequarter", []rune{'¼'}},
+
+		// Single-rune: suffix stripping finds standard name
+		{"onehalf.alt", []rune{'½'}},
+
+		// Multi-rune: ligature with suffix
+		{"t_t.liga", []rune{'t', 't'}},
+		{"f_i.liga", []rune{'f', 'i'}},
+		{"f_l.liga", []rune{'f', 'l'}},
+		{"f_f.liga", []rune{'f', 'f'}},
+
+		// Multi-rune: ligature without suffix
+		{"t_t", []rune{'t', 't'}},
+		{"f_i", []rune{'f', 'i'}},
+		{"f_f_l", []rune{'f', 'f', 'l'}},
+		{"f_f_i", []rune{'f', 'f', 'i'}},
+
+		// Triple ligature with suffix
+		{"f_f_l.liga", []rune{'f', 'f', 'l'}},
+
+		// Unknown names
+		{"nonexistent", nil},
+		{"", nil},
+
+		// Partially resolvable ligature (one component unknown)
+		{"t_unknownglyph", nil},
+
+		// Edge cases: leading/trailing underscore, dot-only, leading dot
+		{"_foo", nil},         // leading underscore → splits to ["", "foo"], "" resolves to 0
+		{"fi_", nil},          // trailing underscore → splits to ["fi", ""], "" resolves to 0
+		{".liga", nil},        // dot at position 0, i > 0 guard skips suffix strip
+		{"t_.liga", nil},      // component "" after split can't resolve
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveGlyphNameMulti(tt.name)
+			if len(got) != len(tt.want) {
+				t.Errorf("resolveGlyphNameMulti(%q) = %v, want %v", tt.name, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("resolveGlyphNameMulti(%q)[%d] = %q, want %q", tt.name, i, string(got[i]), string(tt.want[i]))
+				}
+			}
+		})
+	}
+}
+
+func TestDecodeSimpleWithLigatures(t *testing.T) {
+	chain := &FontEncodingChain{
+		baseEncoding:     &pdfDocEncoding,
+		differences:      make(map[byte]rune),
+		multiDifferences: map[byte][]rune{0x21: {'t', 't'}},
+	}
+
+	// Code 0x21 should produce "tt" via multiDifferences
+	got := chain.decodeSimple(string([]byte{0x21}))
+	if got != "tt" {
+		t.Errorf("decodeSimple(0x21) = %q, want %q", got, "tt")
+	}
+
+	// Normal codes should still work
+	got = chain.decodeSimple("Hello")
+	if got != "Hello" {
+		t.Errorf("decodeSimple(\"Hello\") = %q, want %q", got, "Hello")
+	}
+
+	// Mixed: normal + ligature + normal
+	got = chain.decodeSimple(string([]byte{'L', 'e', 0x21, 'u', 'c', 'e'}))
+	if got != "Lettuce" {
+		t.Errorf("decodeSimple for Lettuce = %q, want %q", got, "Lettuce")
+	}
+}
+
+func TestResolvePUAWithDifferences(t *testing.T) {
+	chain := &FontEncodingChain{
+		baseEncoding:     &pdfDocEncoding,
+		differences:      map[byte]rune{0x22: '¼'},
+		multiDifferences: map[byte][]rune{0x21: {'t', 't'}},
+	}
+
+	// PUA char U+E021 should be resolved to "tt" via multiDifferences
+	got := chain.resolvePUAWithDifferences(string([]rune{0xE021}))
+	if got != "tt" {
+		t.Errorf("resolvePUAWithDifferences(U+E021) = %q, want %q", got, "tt")
+	}
+
+	// PUA char U+E022 should be resolved to '¼' via single-rune differences
+	got = chain.resolvePUAWithDifferences(string([]rune{0xE022}))
+	if got != "¼" {
+		t.Errorf("resolvePUAWithDifferences(U+E022) = %q, want %q", got, "¼")
+	}
+
+	// Mixed: normal CMap result + PUA that needs resolution
+	got = chain.resolvePUAWithDifferences(string([]rune{'L', 'e', 0xE021, 'u', 'c', 'e'}))
+	if got != "Lettuce" {
+		t.Errorf("resolvePUAWithDifferences for Lettuce = %q, want %q", got, "Lettuce")
+	}
+
+	// PUA with no Differences entry passes through unchanged
+	got = chain.resolvePUAWithDifferences(string([]rune{0xE099}))
+	if got != string([]rune{0xE099}) {
+		t.Errorf("resolvePUAWithDifferences(unmapped PUA) should pass through, got %q", got)
+	}
+}
+
+func TestDecodeEndToEndWithCMapAndDifferences(t *testing.T) {
+	// Build a CMap that maps codes 0x41='A' and 0x42='B' but NOT 0x21.
+	// Code 0x21 is in the codespace so it gets PUA. Differences maps
+	// 0x21 → "tt" via multiDifferences. Decode() should return the
+	// improved result with "tt" replacing the PUA char.
+	testCmap := &cmap{
+		space: [4][]byteRange{
+			{{low: "\x00", high: "\xff"}}, // 1-byte codespace
+			{}, {}, {},
+		},
+		bfchar: []bfchar{},
+		bfrange: []bfrange{
+			{lo: "\x41", hi: "\x42", dst: Value{data: string([]byte{0x00, 0x41})}},
+		},
+	}
+
+	chain := &FontEncodingChain{
+		toUnicodeCMap:    testCmap,
+		baseEncoding:     &pdfDocEncoding,
+		differences:      make(map[byte]rune),
+		multiDifferences: map[byte][]rune{0x21: {'t', 't'}},
+	}
+
+	// Code 0x41 is in the CMap → should decode to 'A'
+	got := chain.Decode("\x41")
+	if got != "A" {
+		t.Errorf("Decode(0x41) = %q, want %q", got, "A")
+	}
+
+	// Code 0x21 is NOT in CMap → PUA → resolved via Differences → "tt"
+	got = chain.Decode("\x21")
+	if got != "tt" {
+		t.Errorf("Decode(0x21) = %q, want %q", got, "tt")
+	}
+
+	// Mixed: 'A' (CMap) + 'tt' (Differences) + 'B' (CMap)
+	got = chain.Decode("\x41\x21\x42")
+	if got != "AttB" {
+		t.Errorf("Decode(0x41,0x21,0x42) = %q, want %q", got, "AttB")
+	}
+}
+
+func TestDecodeReturnsValidCMapEvenWithResidualPUA(t *testing.T) {
+	// CMap maps 0x41→'A' but not 0x99. Differences has no entry for 0x99
+	// either. Decode() should still return the CMap result (with PUA for
+	// 0x99) rather than falling through to Layer 3.
+	testCmap := &cmap{
+		space: [4][]byteRange{
+			{{low: "\x00", high: "\xff"}},
+			{}, {}, {},
+		},
+		bfrange: []bfrange{
+			{lo: "\x41", hi: "\x41", dst: Value{data: string([]byte{0x00, 0x41})}},
+		},
+	}
+
+	chain := &FontEncodingChain{
+		toUnicodeCMap:    testCmap,
+		baseEncoding:     &pdfDocEncoding,
+		differences:      make(map[byte]rune),
+		multiDifferences: make(map[byte][]rune),
+	}
+
+	// Should get 'A' + PUA(0x99), not fall through to Layer 3
+	got := chain.Decode("\x41\x99")
+	if !chain.containsPUA(got) {
+		t.Errorf("expected PUA in result for unmapped code with no Differences, got %q", got)
+	}
+	// Should still contain the 'A' from CMap
+	if len([]rune(got)) != 2 || []rune(got)[0] != 'A' {
+		t.Errorf("Decode should preserve CMap result, got %q", got)
+	}
+}
+
+func TestContainsPUA(t *testing.T) {
+	chain := &FontEncodingChain{}
+
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"no PUA", "Hello World", false},
+		{"with PUA", string([]rune{'H', 0xE021, 'o'}), true},
+		{"only PUA", string([]rune{0xE000, 0xE0FF}), true},
+		{"empty", "", false},
+		{"above PUA range", string([]rune{0xE100}), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := chain.containsPUA(tt.text)
+			if got != tt.want {
+				t.Errorf("containsPUA(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 // Benchmark the encoding chain decode performance
 func BenchmarkFontEncodingChain_Decode(b *testing.B) {
 	chain := &FontEncodingChain{
-		baseEncoding: &winAnsiEncoding,
-		differences:  make(map[byte]rune),
+		baseEncoding:     &winAnsiEncoding,
+		differences:      make(map[byte]rune),
+		multiDifferences: make(map[byte][]rune),
 	}
 
 	input := "The quick brown fox jumps over the lazy dog. 0123456789"

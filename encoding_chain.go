@@ -28,8 +28,9 @@ type FontEncodingChain struct {
 	cidSystemInfo   string // Registry-Ordering-Supplement
 
 	// Layer 3: Simple font encoding
-	baseEncoding *[256]rune
-	differences  map[byte]rune
+	baseEncoding     *[256]rune
+	differences      map[byte]rune
+	multiDifferences map[byte][]rune // for ligature glyph names that resolve to multiple runes
 
 	// Layer 4: Font info for fallback
 	fontName string
@@ -38,8 +39,9 @@ type FontEncodingChain struct {
 // NewFontEncodingChain creates an encoding chain for the given font.
 func NewFontEncodingChain(f Font) *FontEncodingChain {
 	chain := &FontEncodingChain{
-		differences: make(map[byte]rune),
-		fontName:    f.BaseFont(),
+		differences:      make(map[byte]rune),
+		multiDifferences: make(map[byte][]rune),
+		fontName:         f.BaseFont(),
 	}
 
 	// Check font type - Type0 fonts are CIDFonts
@@ -145,8 +147,10 @@ func (chain *FontEncodingChain) buildSimpleEncoding(f Font) {
 				}
 				if x.Kind() == Name && code >= 0 && code < 256 {
 					glyphName := x.Name()
-					if r := resolveGlyphName(glyphName); r != 0 {
-						chain.differences[byte(code)] = r
+					if runes := resolveGlyphNameMulti(glyphName); len(runes) == 1 {
+						chain.differences[byte(code)] = runes[0]
+					} else if len(runes) > 1 {
+						chain.multiDifferences[byte(code)] = runes
 					}
 					code++
 				}
@@ -165,6 +169,15 @@ func (chain *FontEncodingChain) Decode(raw string) string {
 	if chain.toUnicodeCMap != nil {
 		result := chain.toUnicodeCMap.Decode(raw)
 		if chain.isValidDecode(result) {
+			// If CMap produced PUA chars for some codes, try to resolve
+			// those via Differences (the CMap may be incomplete)
+			if chain.containsPUA(result) && chain.hasDifferences() {
+				if improved := chain.resolvePUAWithDifferences(result); chain.isValidDecode(improved) {
+					return improved
+				}
+			}
+			// Return original CMap result whether or not it has residual PUA —
+			// it passed isValidDecode so it's the best we have at this layer.
 			return result
 		}
 	}
@@ -224,7 +237,15 @@ func (chain *FontEncodingChain) decodeSimple(raw string) string {
 	for i := 0; i < len(raw); i++ {
 		code := raw[i]
 
-		// Check differences first
+		// Check multi-rune differences first (ligatures)
+		if runes, ok := chain.multiDifferences[code]; ok {
+			for _, r := range runes {
+				result.WriteRune(r)
+			}
+			continue
+		}
+
+		// Check single-rune differences
 		if r, ok := chain.differences[code]; ok {
 			result.WriteRune(r)
 			continue
@@ -375,6 +396,91 @@ func resolveGlyphName(name string) rune {
 	}
 
 	return 0
+}
+
+// resolveGlyphNameMulti resolves a PDF glyph name to one or more Unicode runes.
+// It first tries single-rune resolution via resolveGlyphName, then handles
+// ligature names per the Adobe Glyph List Specification: component glyph names
+// separated by '_', with an optional OpenType feature suffix after '.'
+// (e.g., "t_t.liga" → ['t', 't'], "f_f_l" → ['f', 'f', 'l']).
+func resolveGlyphNameMulti(name string) []rune {
+	// Try single-rune resolution first
+	if r := resolveGlyphName(name); r != 0 {
+		return []rune{r}
+	}
+
+	// Strip suffix after '.' (e.g., ".liga", ".alt", ".smcp")
+	base := name
+	if i := strings.IndexByte(name, '.'); i > 0 {
+		base = name[:i]
+		if r := resolveGlyphName(base); r != 0 {
+			return []rune{r}
+		}
+	}
+
+	// Decompose underscore-separated components (ligatures)
+	if strings.Contains(base, "_") {
+		parts := strings.Split(base, "_")
+		var runes []rune
+		for _, part := range parts {
+			if r := resolveGlyphName(part); r != 0 {
+				runes = append(runes, r)
+			} else {
+				return nil // can't fully resolve
+			}
+		}
+		if len(runes) > 0 {
+			return runes
+		}
+	}
+
+	return nil
+}
+
+// containsPUA reports whether text contains any Private Use Area characters
+// (U+E000-U+E0FF) that indicate unmapped byte values.
+func (chain *FontEncodingChain) containsPUA(text string) bool {
+	for _, r := range text {
+		if r >= 0xE000 && r <= 0xE0FF {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDifferences reports whether the encoding chain has any Differences entries
+// (single-rune or multi-rune) that could resolve unmapped codes.
+func (chain *FontEncodingChain) hasDifferences() bool {
+	return len(chain.differences) > 0 || len(chain.multiDifferences) > 0
+}
+
+// resolvePUAWithDifferences replaces PUA characters in a CMap result with
+// Differences-based decoding. PUA rune U+E0XX corresponds to raw byte 0xXX.
+// For each PUA rune, if the corresponding byte has a Differences mapping,
+// the PUA rune is replaced with the correct character(s). PUA runes with
+// no Differences entry pass through unchanged.
+func (chain *FontEncodingChain) resolvePUAWithDifferences(cmapResult string) string {
+	var result strings.Builder
+	result.Grow(len(cmapResult))
+
+	for _, r := range cmapResult {
+		if r >= 0xE000 && r <= 0xE0FF {
+			code := byte(r - 0xE000)
+			if runes, ok := chain.multiDifferences[code]; ok {
+				for _, mr := range runes {
+					result.WriteRune(mr)
+				}
+				continue
+			}
+			if dr, ok := chain.differences[code]; ok {
+				result.WriteRune(dr)
+				continue
+			}
+		}
+		result.WriteRune(r)
+	}
+
+	return result.String()
 }
 
 // getPredefinedCMap returns a predefined CMap by name.
