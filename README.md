@@ -138,7 +138,26 @@ func main() {
 | Upstream sync | Merged through upstream@HEAD (2024) |
 | Shift-JIS CMaps | Added |
 | UCS-2 BE CMaps | Added |
-| GBK CMaps | Added |
-| Big5-ETen CMaps | Added |
-| UHC/EUC-KR CMaps | Added |
-| Upstream PRs incorporated | #37, #42, #45 |
+| GBK / GB-EUC / GBKp-EUC CMaps | Added |
+| Big5-ETen / ETenms CMaps | Added |
+| UHC / KSC-EUC / UHC-HW CMaps | Added |
+| Metadata API (`r.Info()`) | Added |
+| Outline page numbers (`Outline.Page`) | Added |
+| Context / cancellation | Added |
+| Crash/CPU-spike on PDFs with inline images ([upstream #57](https://github.com/ledongthuc/pdf/issues/57)) | Fixed — `readHexString` EOF guard + `Interpret` inline-image skip |
+| Upstream PRs incorporated | #37, #42, #45, #58, #61, #63, #64, #66 |
+
+### Resolved upstream issues
+
+| Issue | Title | How it was fixed | Status |
+|-------|-------|------------------|--------|
+| [#57](https://github.com/ledongthuc/pdf/issues/57) | Crash when image is in there (malformed PNG) | `case "ID":` skip in `ps.go` `Interpret()`; `readHexString` EOF guard in `lex.go` | Directly fixed |
+| [#55](https://github.com/ledongthuc/pdf/issues/55) | GetPlainText do not support encoding "UniGB-UCS2-H" | `ucs2BEEncoder` wired for all 8 `Uni*-UCS2-H/V` CMap names | Directly fixed |
+| [#44](https://github.com/ledongthuc/pdf/issues/44) | Cannot read Chinese | GBK / Big5 / UniGB / UniCNS CMaps all wired in `getEncoder()` | Directly fixed |
+| [#21](https://github.com/ledongthuc/pdf/issues/21) | unknown encoding UniGB-UCS2-H | Same fix as #55 — `ucs2BEEncoder` handles `UniGB-UCS2-H` | Directly fixed |
+| [#30](https://github.com/ledongthuc/pdf/issues/30) | crash when encountering some CJK text amongst English | `dictEncoder` rewrite; `maxObjectDepth` guard; `readArray` EOF fix | Directly fixed |
+| [#13](https://github.com/ledongthuc/pdf/issues/13) | Load Reader from bytes instead of file path | `OpenBytes(src []byte)` added in `read.go` | Directly fixed |
+| [#16](https://github.com/ledongthuc/pdf/issues/16) | GetTextByRow returns disordered text | `sort.Sort` → `sort.Stable` in `GetTextByRow`/`GetTextByColumn` | Directly fixed |
+| [#22](https://github.com/ledongthuc/pdf/issues/22) | Handle space after header | Relaxed byte-8 check in `NewReaderEncrypted` to accept space/tab | Directly fixed |
+| [#48](https://github.com/ledongthuc/pdf/issues/48) | `\n` added by recent version breaks old systems | Removed `showText("\n")` from `case "BT":` — BT is matrix-init, not line-break | Directly fixed |
+| [#60](https://github.com/ledongthuc/pdf/issues/60) | Parse PDF, some content appears garbled | Removed shared `fonts` map from `(*Reader).GetPlainText`; each page now passes `nil` so `(*Page).GetPlainText` builds a fresh per-page font map | Directly fixed |
