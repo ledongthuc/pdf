@@ -131,6 +131,39 @@ Reading:
 			case "pop":
 				stk.Pop()
 				continue
+			case "ID":
+				// Inline image: binary pixel data follows until the EI keyword.
+				// Scan byte-by-byte; calling readToken on raw binary would feed
+				// the lexer arbitrary bytes (e.g. 0x3c triggering readHexString)
+				// and loop indefinitely.  Per PDF spec §8.9.7, EI must be
+				// preceded by a whitespace character.
+				for !b.eof {
+					c := b.readByte()
+					if c != 'E' {
+						continue
+					}
+					c2 := b.readByte()
+					if b.eof {
+						break
+					}
+					if c2 != 'I' {
+						b.unreadByte()
+						continue
+					}
+					// Verify the two-char sequence is truly the EI keyword
+					// (followed by whitespace, a delimiter, or EOF).
+					c3 := b.readByte()
+					if b.eof || isSpace(c3) || isDelim(c3) {
+						if !b.eof {
+							b.unreadByte()
+						}
+						break
+					}
+					// False positive inside image data; keep scanning.
+					b.unreadByte()
+				}
+				do(&stk, "EI")
+				continue
 			}
 		}
 		b.unreadToken(tok)

@@ -189,6 +189,9 @@ func (b *buffer) readHexString() token {
 	for {
 	Loop:
 		c := b.readByte()
+		if b.eof {
+			break
+		}
 		if c == '>' {
 			break
 		}
@@ -197,6 +200,9 @@ func (b *buffer) readHexString() token {
 		}
 	Loop2:
 		c2 := b.readByte()
+		if b.eof {
+			break
+		}
 		if isSpace(c2) {
 			goto Loop2
 		}

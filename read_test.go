@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReadObjectMaxDepth(t *testing.T) {
@@ -111,6 +112,86 @@ func TestReadObjectNormalDepth(t *testing.T) {
 	}()
 	if panicked {
 		t.Fatal("unexpected panic from moderately nested dicts")
+	}
+}
+
+// testStream wraps raw bytes as a Value of Kind Stream (no filter).
+func testStream(data []byte) Value {
+	r := &Reader{f: bytes.NewReader(data), end: int64(len(data))}
+	s := stream{hdr: dict{name("Length"): int64(len(data))}, offset: 0}
+	return Value{r, objptr{}, s}
+}
+
+// TestReadHexStringEOF confirms readHexString terminates when the stream ends
+// before the closing '>'.  Without an EOF guard the function spins forever:
+// readByte() returns '\n' (a space) after EOF, isSpace('\n') is true, and
+// `goto Loop` loops indefinitely without advancing the stream position.
+// The input must be all-whitespace after '<' so the loop spins rather than
+// hitting the errorf() path (which only fires on invalid hex pairs).
+func TestReadHexStringEOF(t *testing.T) {
+	// '<' followed by whitespace only — no closing '>'.
+	// After all bytes are consumed, readByte returns '\n' (EOF sentinel),
+	// isSpace('\n')==true → goto Loop → infinite spin without the fix.
+	b := newBuffer(strings.NewReader("<   \t  "), 0)
+	b.allowEOF = true
+
+	done := make(chan token, 1)
+	go func() { done <- b.readToken() }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readHexString hung: missing EOF guard in readHexString")
+	}
+}
+
+// TestInterpretInlineImage confirms that Interpret skips inline-image binary
+// data (BI … ID <binary> EI) and continues processing operators after EI.
+// The binary blob deliberately contains 0x3c ('<') to trigger the lexer path
+// that hangs without the ID skip + readHexString EOF guard.
+func TestInterpretInlineImage(t *testing.T) {
+	binary := []byte{0x3c, 0xff, 0x00, 0x3c, 0x41} // contains '<' (0x3c)
+	var buf bytes.Buffer
+	buf.WriteString("BI\n/W 10\n/H 10\nID\n")
+	buf.Write(binary)
+	buf.WriteString("\nEI\n(hello) Tj\n")
+
+	strm := testStream(buf.Bytes())
+
+	type result struct {
+		ops []string
+		err interface{}
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var ops []string
+		var panicVal interface{}
+		func() {
+			defer func() { panicVal = recover() }()
+			Interpret(strm, func(stk *Stack, op string) {
+				ops = append(ops, op)
+			})
+		}()
+		ch <- result{ops, panicVal}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("Interpret panicked: %v", r.err)
+		}
+		found := false
+		for _, op := range r.ops {
+			if op == "Tj" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("'Tj' not seen after inline image EI; ops: %v", r.ops)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Interpret hung on content stream with inline image (binary data contains 0x3c)")
 	}
 }
 
