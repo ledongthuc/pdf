@@ -14,6 +14,9 @@ import (
 
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/korean"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/traditionalchinese"
 )
 
 // A Page represent a single page in a PDF file.
@@ -220,6 +223,12 @@ func (f Font) getEncoder() TextEncoding {
 			"UniJIS-UCS2-H", "UniJIS-UCS2-V",
 			"UniKS-UCS2-H", "UniKS-UCS2-V":
 			return &ucs2BEEncoder{}
+		case "GBK-EUC-H", "GBK-EUC-V":
+			return &multibyteCMapEncoder{simplifiedchinese.GBK}
+		case "ETen-B5-H", "ETen-B5-V":
+			return &multibyteCMapEncoder{traditionalchinese.Big5}
+		case "KSCms-UHC-H", "KSCms-UHC-V":
+			return &multibyteCMapEncoder{korean.EUCKR}
 		default:
 			if DebugOn {
 				println("unknown encoding", enc.Name())
