@@ -11,6 +11,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/japanese"
 )
 
 // A Page represent a single page in a PDF file.
@@ -210,6 +213,13 @@ func (f Font) getEncoder() TextEncoding {
 			return &byteEncoder{&macRomanEncoding}
 		case "Identity-H":
 			return f.charmapEncoding()
+		case "90ms-RKSJ-H", "90ms-RKSJ-V", "90pv-RKSJ-H":
+			return &multibyteCMapEncoder{japanese.ShiftJIS}
+		case "UniGB-UCS2-H", "UniGB-UCS2-V",
+			"UniCNS-UCS2-H", "UniCNS-UCS2-V",
+			"UniJIS-UCS2-H", "UniJIS-UCS2-V",
+			"UniKS-UCS2-H", "UniKS-UCS2-V":
+			return &ucs2BEEncoder{}
 		default:
 			if DebugOn {
 				println("unknown encoding", enc.Name())
@@ -285,6 +295,35 @@ type nopEncoder struct {
 
 func (e *nopEncoder) Decode(raw string) (text string) {
 	return raw
+}
+
+// multibyteCMapEncoder decodes PDF content-stream bytes using an x/text Encoding.
+// Used for predefined CMaps whose raw bytes are a well-known legacy encoding
+// (e.g. Shift-JIS for 90ms-RKSJ-H/V). Falls back to raw bytes on error.
+type multibyteCMapEncoder struct {
+	enc encoding.Encoding
+}
+
+func (e *multibyteCMapEncoder) Decode(raw string) (text string) {
+	decoded, err := e.enc.NewDecoder().Bytes([]byte(raw))
+	if err != nil {
+		return raw
+	}
+	return string(decoded)
+}
+
+// ucs2BEEncoder decodes PDF content-stream bytes encoded as UCS-2 big-endian.
+// Used for predefined CMaps such as UniGB-UCS2-H/V, UniCNS-UCS2-H/V,
+// UniJIS-UCS2-H/V, and UniKS-UCS2-H/V. Each glyph selector is a 2-byte
+// big-endian code point in the BMP. No external dependency required.
+type ucs2BEEncoder struct{}
+
+func (e *ucs2BEEncoder) Decode(raw string) (text string) {
+	r := make([]rune, 0, len(raw)/2)
+	for i := 0; i+1 < len(raw); i += 2 {
+		r = append(r, rune(uint16(raw[i])<<8|uint16(raw[i+1])))
+	}
+	return string(r)
 }
 
 type byteEncoder struct {
