@@ -151,13 +151,15 @@ func main() {
 
 | Issue | Title | How it was fixed | Status |
 |-------|-------|------------------|--------|
-| [#57](https://github.com/ledongthuc/pdf/issues/57) | Crash when image is in there (malformed PNG) | `case "ID":` skip in `ps.go` `Interpret()`; `readHexString` EOF guard in `lex.go` | Directly fixed |
-| [#55](https://github.com/ledongthuc/pdf/issues/55) | GetPlainText do not support encoding "UniGB-UCS2-H" | `ucs2BEEncoder` wired for all 8 `Uni*-UCS2-H/V` CMap names | Directly fixed |
-| [#44](https://github.com/ledongthuc/pdf/issues/44) | Cannot read Chinese | GBK / Big5 / UniGB / UniCNS CMaps all wired in `getEncoder()` | Directly fixed |
-| [#21](https://github.com/ledongthuc/pdf/issues/21) | unknown encoding UniGB-UCS2-H | Same fix as #55 — `ucs2BEEncoder` handles `UniGB-UCS2-H` | Directly fixed |
-| [#30](https://github.com/ledongthuc/pdf/issues/30) | crash when encountering some CJK text amongst English | `dictEncoder` rewrite; `maxObjectDepth` guard; `readArray` EOF fix | Directly fixed |
 | [#13](https://github.com/ledongthuc/pdf/issues/13) | Load Reader from bytes instead of file path | `OpenBytes(src []byte)` added in `read.go` | Directly fixed |
 | [#16](https://github.com/ledongthuc/pdf/issues/16) | GetTextByRow returns disordered text | `sort.Sort` → `sort.Stable` in `GetTextByRow`/`GetTextByColumn` | Directly fixed |
+| [#18](https://github.com/ledongthuc/pdf/issues/18) | GetTextByRow X/Y always 0 | `Td`/`TD`/`T*`/`TL` wired in `walkTextBlocks`; `BT` resets position; `currentTL` tracks leading | Directly fixed |
+| [#21](https://github.com/ledongthuc/pdf/issues/21) | unknown encoding UniGB-UCS2-H | Same fix as #55 — `ucs2BEEncoder` handles `UniGB-UCS2-H` | Directly fixed |
 | [#22](https://github.com/ledongthuc/pdf/issues/22) | Handle space after header | Relaxed byte-8 check in `NewReaderEncrypted` to accept space/tab | Directly fixed |
+| [#27](https://github.com/ledongthuc/pdf/issues/27) | GetTextByRow returns empty rows | `Td` in `walkTextBlocks` now updates `currentX`/`currentY` additively instead of emitting a spurious empty walker call; `TD` and `TL` wired; `T*` decrements Y by leading | Directly fixed |
+| [#30](https://github.com/ledongthuc/pdf/issues/30) | crash when encountering some CJK text amongst English | `dictEncoder` rewrite; `maxObjectDepth` guard; `readArray` EOF fix | Directly fixed |
+| [#44](https://github.com/ledongthuc/pdf/issues/44) | Cannot read Chinese | GBK / Big5 / UniGB / UniCNS CMaps all wired in `getEncoder()` | Directly fixed |
 | [#48](https://github.com/ledongthuc/pdf/issues/48) | `\n` added by recent version breaks old systems | Removed `showText("\n")` from `case "BT":` — BT is matrix-init, not line-break | Directly fixed |
+| [#55](https://github.com/ledongthuc/pdf/issues/55) | GetPlainText do not support encoding "UniGB-UCS2-H" | `ucs2BEEncoder` wired for all 8 `Uni*-UCS2-H/V` CMap names | Directly fixed |
+| [#57](https://github.com/ledongthuc/pdf/issues/57) | Crash when image is in there (malformed PNG) | `case "ID":` skip in `ps.go` `Interpret()`; `readHexString` EOF guard in `lex.go` | Directly fixed |
 | [#60](https://github.com/ledongthuc/pdf/issues/60) | Parse PDF, some content appears garbled | Removed shared `fonts` map from `(*Reader).GetPlainText`; each page now passes `nil` so `(*Page).GetPlainText` builds a fresh per-page font map | Directly fixed |

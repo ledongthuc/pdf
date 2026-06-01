@@ -825,7 +825,7 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 	}
 
 	var enc TextEncoding = &nopEncoder{}
-	var currentX, currentY float64
+	var currentX, currentY, currentTL float64
 	Interpret(strm, func(stk *Stack, op string) {
 		n := stk.Len()
 		args := make([]Value, n)
@@ -840,7 +840,16 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 		switch op {
 		default:
 			return
-		case "T*": // move to start of next line
+		case "BT": // begin text object: reset text position (leading persists)
+			currentX = 0
+			currentY = 0
+		case "T*": // move to start of next line: equivalent to 0 -TL Td
+			currentY -= currentTL
+		case "TL": // set text leading
+			if len(args) != 1 {
+				return
+			}
+			currentTL = args[0].Float64()
 		case "Tf": // set text font and size
 			if len(args) != 2 {
 				panic("bad TL")
@@ -875,8 +884,20 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 					walker(enc, currentX, currentY, x.RawString())
 				}
 			}
-		case "Td":
-			walker(enc, currentX, currentY, "")
+		case "Td": // move text position
+			if len(args) != 2 {
+				return
+			}
+			currentX += args[0].Float64()
+			currentY += args[1].Float64()
+		case "TD": // move text position and set leading
+			if len(args) != 2 {
+				return
+			}
+			ty := args[1].Float64()
+			currentX += args[0].Float64()
+			currentY += ty
+			currentTL = -ty
 		case "Tm":
 			currentX = args[4].Float64()
 			currentY = args[5].Float64()
