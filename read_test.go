@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,90 @@ func TestInterpretInlineImage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Interpret hung on content stream with inline image (binary data contains 0x3c)")
+	}
+}
+
+// buildTextPDF returns a minimal single-page PDF whose content stream is
+// contentStream.  The page declares Helvetica (/F1) so Tf operators work.
+// Length is len(contentStream)+1 to account for the \n written before endstream.
+func buildTextPDF(contentStream string) []byte {
+	var b strings.Builder
+	offsets := make([]int, 6) // offsets[1..5] for objects 1-5
+
+	b.WriteString("%PDF-1.4\n")
+
+	offsets[1] = b.Len()
+	b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+
+	offsets[2] = b.Len()
+	b.WriteString("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+
+	offsets[3] = b.Len()
+	b.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n")
+
+	offsets[4] = b.Len()
+	fmt.Fprintf(&b, "4 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		len(contentStream)+1, contentStream)
+
+	offsets[5] = b.Len()
+	b.WriteString("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+
+	xrefOff := b.Len()
+	fmt.Fprintf(&b, "xref\n0 6\n0000000000 65535 f \n")
+	for i := 1; i <= 5; i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xrefOff)
+	return []byte(b.String())
+}
+
+// TestGetPlainTextNoBTNewline is a regression guard for upstream #48:
+// a past commit added showText("\n") inside case "BT", prepending a newline
+// before every text object.  BT is a matrix-initialisation operator (PDF
+// spec §9.4.1) and should not emit whitespace.
+func TestGetPlainTextNoBTNewline(t *testing.T) {
+	data := buildTextPDF("BT /F1 12 Tf (Hello) Tj ET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got, err := r.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText: %v", err)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("BT operator injected newline into output; got %q", got)
+	}
+}
+
+// TestGetPlainTextBTNoSeparator pins the pre-826abbb behaviour: adjacent
+// BT/ET blocks are not separated by a newline.
+func TestGetPlainTextBTNoSeparator(t *testing.T) {
+	data := buildTextPDF("BT /F1 12 Tf (Hello) Tj ET\nBT (World) Tj ET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got, err := r.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText: %v", err)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("adjacent BT/ET blocks should not produce newlines; got %q", got)
+	}
+}
+
+// TestOpenBytesSpaceAfterHeader confirms that PDFs with a space between the
+// version string and the newline (e.g. libtiff/tiff2pdf output) are accepted.
+// Upstream issue #22.
+func TestOpenBytesSpaceAfterHeader(t *testing.T) {
+	// Build a minimal valid PDF but with "%PDF-1.4 \n" header (space before newline).
+	base := buildTextPDF("BT (Hi) Tj ET")
+	// Replace the header newline with space+newline.
+	src := strings.Replace(string(base), "%PDF-1.4\n", "%PDF-1.4 \n", 1)
+	_, err := OpenBytes([]byte(src))
+	if err != nil {
+		t.Fatalf("OpenBytes rejected PDF with space after header: %v", err)
 	}
 }
 

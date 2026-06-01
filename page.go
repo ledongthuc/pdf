@@ -612,9 +612,6 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 	}
 
 	var textBuilder bytes.Buffer
-	showText := func(s string) {
-		textBuilder.WriteString(s)
-	}
 	showEncodedText := func(s string) {
 		for _, ch := range enc.Decode(s) {
 			_, err := textBuilder.WriteRune(ch)
@@ -636,8 +633,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 			// Easier debug
 			// fmt.Println("<DEBUG><op>", op, "</op><args>", args, "</args>")
 			return
-		case "BT": // add a space between text objects
-			showText("\n")
+		case "BT": // begin text object — no whitespace emitted
 		case "T*": // move to start of next line
 			showEncodedText("\n")
 		case "Tf": // set text font and size
@@ -737,7 +733,7 @@ func (p Page) GetTextByColumn() (Columns, error) {
 	p.walkTextBlocks(showText)
 
 	for _, column := range result {
-		sort.Sort(column.Content)
+		sort.Stable(column.Content)
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -811,7 +807,7 @@ func (p Page) GetTextByRow() (Rows, error) {
 	p.walkTextBlocks(showText)
 
 	for _, row := range result {
-		sort.Sort(row.Content)
+		sort.Stable(row.Content)
 	}
 
 	sort.Slice(result, func(i, j int) bool {
