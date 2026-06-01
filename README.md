@@ -1,25 +1,42 @@
 # PDF Reader
 
-[![Built with WeBuild](https://raw.githubusercontent.com/webuild-community/badge/master/svg/WeBuild.svg)](https://webuild.community)
+A Go library for reading PDF files, with active CJK text extraction support.
 
-A simple Go library which enables reading PDF files. Forked from https://github.com/rsc/pdf
+Forked from [ledongthuc/pdf](https://github.com/ledongthuc/pdf) (upstream inactive since 2024).
+Original lineage: [rsc/pdf](https://github.com/rsc/pdf).
 
-Features
-  - Get plain text content (without format)
-  - Get Content (including all font and formatting information)
+## Features
 
-## Install:
+- Plain text extraction (no formatting)
+- Styled text extraction (font name, size, position)
+- Text grouped by row
+- **CJK predefined CMap decoders** (added in this fork):
+  - Japanese Shift-JIS (`90ms-RKSJ-H/V`, `90pv-RKSJ-H`)
+  - CJK UCS-2 BE (`UniGB-UCS2-H/V`, `UniCNS-UCS2-H/V`, `UniJIS-UCS2-H/V`, `UniKS-UCS2-H/V`)
+  - Simplified Chinese GBK (`GBK-EUC-H/V`)
+  - Traditional Chinese Big5-ETen (`ETen-B5-H/V`)
+  - Korean UHC/EUC-KR (`KSCms-UHC-H/V`)
 
-`go get -u github.com/ledongthuc/pdf`
+## Install
 
-## Examples:
+```bash
+go get github.com/Detective-XH/pdf
+```
 
- - Check in examples/ folder
+To use this fork in a project that already depends on `ledongthuc/pdf`, add a
+`replace` directive:
 
+```
+replace github.com/ledongthuc/pdf => github.com/Detective-XH/pdf v0.0.0-latest
+```
 
-## Read plain text
+## Examples
 
-```golang
+See the `examples/` folder for runnable programs.
+
+### Read plain text
+
+```go
 package main
 
 import (
@@ -30,9 +47,7 @@ import (
 )
 
 func main() {
-	pdf.DebugOn = true
-
-	f, r, err := pdf.Open("./pdf_test.pdf")
+	f, r, err := pdf.Open("./sample.pdf")
 	if err != nil {
 		panic(err)
 	}
@@ -44,14 +59,13 @@ func main() {
 		panic(err)
 	}
 	buf.ReadFrom(b)
-	content := buf.String()
-	fmt.Println(content)
+	fmt.Println(buf.String())
 }
 ```
 
-## Read all text with styles from PDF
+### Read styled text
 
-```golang
+```go
 package main
 
 import (
@@ -61,7 +75,7 @@ import (
 )
 
 func main() {
-	f, r, err := pdf.Open("./pdf_test.pdf")
+	f, r, err := pdf.Open("./sample.pdf")
 	if err != nil {
 		panic(err)
 	}
@@ -71,23 +85,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
-	// Print all sentences
-	for _, sentence := range sentences {
-		fmt.Printf("Font: %s, Font-size: %f, x: %f, y: %f, content: %s \n",
-			sentence.Font,
-			sentence.FontSize,
-			sentence.X,
-			sentence.Y,
-			sentence.S)
+	for _, s := range sentences {
+		fmt.Printf("font=%s size=%.1f x=%.1f y=%.1f text=%s\n",
+			s.Font, s.FontSize, s.X, s.Y, s.S)
 	}
 }
 ```
 
+### Read text by row
 
-## Read text grouped by rows
-
-```golang
+```go
 package main
 
 import (
@@ -98,41 +105,37 @@ import (
 )
 
 func main() {
-	content, err := readPdf(os.Args[1]) // Read local pdf file
+	f, r, err := pdf.Open(os.Args[1])
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(content)
-	return
-}
+	defer f.Close()
 
-func readPdf(path string) (string, error) {
-	f, r, err := pdf.Open(path)
-	defer func() {
-		_ = f.Close()
-	}()
-	if err != nil {
-		return "", err
-	}
-	totalPage := r.NumPage()
-
-	for pageIndex := 1; pageIndex <= totalPage; pageIndex++ {
-		p := r.Page(pageIndex)
-		if p.V.IsNull() || p.V.Key("Contents").Kind() == pdf.Null {
+	for i := 1; i <= r.NumPage(); i++ {
+		p := r.Page(i)
+		if p.V.IsNull() {
 			continue
 		}
-
 		rows, _ := p.GetTextByRow()
 		for _, row := range rows {
-		    println(">>>> row: ", row.Position)
-		    for _, word := range row.Content {
-		        fmt.Println(word.S)
-		    }
+			fmt.Printf("row %d:", row.Position)
+			for _, word := range row.Content {
+				fmt.Printf(" %s", word.S)
+			}
+			fmt.Println()
 		}
 	}
-	return "", nil
 }
 ```
 
-## Demo
-![Run example](https://i.gyazo.com/01fbc539e9872593e0ff6bac7e954e6d.gif)
+## Fork status
+
+| Area | Status |
+|------|--------|
+| Upstream sync | Merged through upstream@HEAD (2024) |
+| Shift-JIS CMaps | Added |
+| UCS-2 BE CMaps | Added |
+| GBK CMaps | Added |
+| Big5-ETen CMaps | Added |
+| UHC/EUC-KR CMaps | Added |
+| Upstream PRs incorporated | #37, #42, #45 |
