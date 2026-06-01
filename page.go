@@ -235,11 +235,16 @@ func (f Font) getEncoder() TextEncoding {
 			"UniJIS-UCS2-H", "UniJIS-UCS2-V",
 			"UniKS-UCS2-H", "UniKS-UCS2-V":
 			return &ucs2BEEncoder{}
-		case "GBK-EUC-H", "GBK-EUC-V":
+		case "GB-EUC-H", "GB-EUC-V",
+			"GBKp-EUC-H", "GBKp-EUC-V",
+			"GBK-EUC-H", "GBK-EUC-V":
 			return &multibyteCMapEncoder{simplifiedchinese.GBK}
-		case "ETen-B5-H", "ETen-B5-V":
+		case "ETen-B5-H", "ETen-B5-V",
+			"ETenms-B5-H", "ETenms-B5-V":
 			return &multibyteCMapEncoder{traditionalchinese.Big5}
-		case "KSCms-UHC-H", "KSCms-UHC-V":
+		case "KSCms-UHC-H", "KSCms-UHC-V",
+			"KSC-EUC-H", "KSC-EUC-V",
+			"KSCms-UHC-HW-H", "KSCms-UHC-HW-V":
 			return &multibyteCMapEncoder{korean.EUCKR}
 		default:
 			if DebugOn {
@@ -1148,6 +1153,7 @@ func (x TextHorizontal) Less(i, j int) bool {
 // of a document.
 type Outline struct {
 	Title string    // title for this element
+	Page  int       // 1-based page number; 0 if destination cannot be resolved
 	Child []Outline // child elements
 }
 
@@ -1155,14 +1161,54 @@ type Outline struct {
 // The Outline returned is the root of the outline tree and typically has no Title itself.
 // That is, the children of the returned root are the top-level entries in the outline.
 func (r *Reader) Outline() Outline {
-	return buildOutline(r.Trailer().Key("Root").Key("Outlines"))
+	pages := r.buildPageMap()
+	return buildOutline(r.Trailer().Key("Root").Key("Outlines"), pages)
 }
 
-func buildOutline(entry Value) Outline {
+func (r *Reader) buildPageMap() map[uint32]int {
+	m := make(map[uint32]int)
+	n := r.NumPage()
+	for i := 1; i <= n; i++ {
+		p := r.Page(i)
+		if !p.V.IsNull() {
+			m[p.V.ptr.id] = i
+		}
+	}
+	return m
+}
+
+func buildOutline(entry Value, pages map[uint32]int) Outline {
 	var x Outline
 	x.Title = entry.Key("Title").Text()
+	x.Page = resolveOutlineDest(entry, pages)
 	for child := entry.Key("First"); child.Kind() == Dict; child = child.Key("Next") {
-		x.Child = append(x.Child, buildOutline(child))
+		x.Child = append(x.Child, buildOutline(child, pages))
 	}
 	return x
+}
+
+func resolveOutlineDest(entry Value, pages map[uint32]int) int {
+	dest := entry.Key("Dest")
+	if dest.Kind() == Array {
+		return pageFromDestArray(dest, pages)
+	}
+	action := entry.Key("A")
+	if action.Key("S").Name() == "GoTo" {
+		d := action.Key("D")
+		if d.Kind() == Array {
+			return pageFromDestArray(d, pages)
+		}
+	}
+	return 0
+}
+
+func pageFromDestArray(dest Value, pages map[uint32]int) int {
+	if dest.Len() == 0 {
+		return 0
+	}
+	pageVal := dest.Index(0)
+	if n, ok := pages[pageVal.ptr.id]; ok {
+		return n
+	}
+	return 0
 }
