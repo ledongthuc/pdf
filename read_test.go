@@ -196,6 +196,26 @@ func TestInterpretInlineImage(t *testing.T) {
 	}
 }
 
+// TestInterpretDictStack exercises the execPS dict-stack path:
+// begin/def/end store a value; symbol lookup retrieves it without calling do;
+// end closes the dict; unknown operators beyond the dict scope reach do.
+func TestInterpretDictStack(t *testing.T) {
+	// "1 dict begin" — create dict, open it.
+	// "/K 99 def"    — store 99 under key K.
+	// "K"            — resolved via dict lookup → pushed, NOT dispatched to do.
+	// "pop"          — handled by execPS, discards the 99.
+	// "end"          — closes the dict.
+	// "sentinel"     — unknown keyword; must reach do.
+	const ps = "1 dict begin /K 99 def K pop end sentinel"
+	var ops []string
+	Interpret(testStream([]byte(ps)), func(stk *Stack, op string) {
+		ops = append(ops, op)
+	})
+	if len(ops) != 1 || ops[0] != "sentinel" {
+		t.Fatalf("expected [sentinel], got %v", ops)
+	}
+}
+
 // buildTextPDF returns a minimal single-page PDF whose content stream is
 // contentStream.  The page declares Helvetica (/F1) so Tf operators work.
 // Length is len(contentStream)+1 to account for the \n written before endstream.
