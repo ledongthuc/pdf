@@ -130,33 +130,41 @@ func decodeBfrange(entry bfrange, text string) ([]rune, bool) {
 	return []rune{noRune}, true
 }
 
-func (m *cmap) Decode(raw string) (text string) {
-	var r []rune
-Parse:
-	for len(raw) > 0 {
-		for n := 1; n <= 4 && n <= len(raw); n++ {
-			for _, space := range m.space[n-1] {
-				if space.low <= raw[:n] && raw[:n] <= space.high {
-					text := raw[:n]
-					raw = raw[n:]
-					if runes, ok := m.lookupBfchar(text, n); ok {
-						r = append(r, runes...)
-						continue Parse
-					}
-					if runes, ok := m.lookupBfrange(text, n); ok {
-						r = append(r, runes...)
-						continue Parse
-					}
-					r = append(r, noRune)
-					continue Parse
+// decodeOne matches the longest codespace prefix of raw (up to 4 bytes),
+// looks it up in bfchar/bfrange, and returns the decoded runes plus the
+// number of bytes consumed. Returns (nil, 0) when no codespace matches.
+func (m *cmap) decodeOne(raw string) ([]rune, int) {
+	for n := 1; n <= 4 && n <= len(raw); n++ {
+		for _, space := range m.space[n-1] {
+			if space.low <= raw[:n] && raw[:n] <= space.high {
+				text := raw[:n]
+				if runes, ok := m.lookupBfchar(text, n); ok {
+					return runes, n
 				}
+				if runes, ok := m.lookupBfrange(text, n); ok {
+					return runes, n
+				}
+				return []rune{noRune}, n
 			}
 		}
-		if DebugOn {
-			println("no code space found")
+	}
+	return nil, 0
+}
+
+func (m *cmap) Decode(raw string) (text string) {
+	var r []rune
+	for len(raw) > 0 {
+		runes, n := m.decodeOne(raw)
+		if n == 0 {
+			if DebugOn {
+				println("no code space found")
+			}
+			r = append(r, noRune)
+			raw = raw[1:]
+			continue
 		}
-		r = append(r, noRune)
-		raw = raw[1:]
+		r = append(r, runes...)
+		raw = raw[n:]
 	}
 	return string(r)
 }
@@ -210,6 +218,25 @@ func (s *cmapInterp) handleEndBfrange(stk *Stack) {
 	}
 }
 
+// interpretCmapRanges handles the codespace/bfchar/bfrange operators and the
+// debug-unknown default. Separated from interpretCmap to reduce cyclomatic complexity.
+func (s *cmapInterp) interpretCmapRanges(stk *Stack, op string) {
+	switch op {
+	case "begincodespacerange", "beginbfchar", "beginbfrange":
+		s.n = int(stk.Pop().Int64())
+	case "endcodespacerange":
+		s.handleEndCodespace(stk)
+	case "endbfchar":
+		s.handleEndBfchar(stk)
+	case "endbfrange":
+		s.handleEndBfrange(stk)
+	default:
+		if DebugOn {
+			println("interp\t", op)
+		}
+	}
+}
+
 func (s *cmapInterp) interpretCmap(stk *Stack, op string) {
 	if !s.ok {
 		return
@@ -223,27 +250,13 @@ func (s *cmapInterp) interpretCmap(stk *Stack, op string) {
 		stk.Push(newDict())
 	case "endcmap":
 		stk.Pop()
-	case "begincodespacerange":
-		s.n = int(stk.Pop().Int64())
-	case "endcodespacerange":
-		s.handleEndCodespace(stk)
-	case "beginbfchar":
-		s.n = int(stk.Pop().Int64())
-	case "endbfchar":
-		s.handleEndBfchar(stk)
-	case "beginbfrange":
-		s.n = int(stk.Pop().Int64())
-	case "endbfrange":
-		s.handleEndBfrange(stk)
 	case "defineresource":
 		stk.Pop().Name()
 		value := stk.Pop()
 		stk.Pop().Name()
 		stk.Push(value)
 	default:
-		if DebugOn {
-			println("interp\t", op)
-		}
+		s.interpretCmapRanges(stk, op)
 	}
 }
 
