@@ -138,10 +138,6 @@ func (p Page) GetTextByRow() (Rows, error) {
 			}
 		}
 
-		// if DebugOn {
-		// 	fmt.Println(textBuilder.String())
-		// }
-
 		text := Text{
 			S: textBuilder.String(),
 			X: currentX,

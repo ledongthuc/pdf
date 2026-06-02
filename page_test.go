@@ -706,3 +706,163 @@ func TestGetStyledTextsXObjectForm(t *testing.T) {
 		t.Errorf("Content().Text joined = %q; want it to contain %q", got.String(), "world")
 	}
 }
+
+// buildWidthsFontPDF returns a minimal PDF whose /F1 font carries explicit
+// /FirstChar, /LastChar, and /Widths entries.
+// Font /F1: FirstChar=65 ('A'), LastChar=67 ('C'), Widths=[722, 667, 667].
+func buildWidthsFontPDF() []byte {
+	stream := "BT /F1 12 Tf (ABC) Tj ET"
+	return buildPDFFromObjects([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /LastChar 67 /Widths [722 667 667] >>",
+	})
+}
+
+// TestFontWidths verifies that Widths() returns the /Widths array from the
+// font dictionary and satisfies the invariant len == LastChar+1 - FirstChar.
+func TestFontWidths(t *testing.T) {
+	r, err := OpenBytes(buildWidthsFontPDF())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	f := r.Page(1).Font("F1")
+
+	widths := f.Widths()
+	want := []float64{722, 667, 667}
+	if len(widths) != len(want) {
+		t.Fatalf("Widths() len = %d, want %d", len(widths), len(want))
+	}
+	for i, w := range want {
+		if widths[i] != w {
+			t.Errorf("Widths()[%d] = %v, want %v", i, widths[i], w)
+		}
+	}
+	// invariant: len == LastChar+1 - FirstChar
+	first, last := f.FirstChar(), f.LastChar()
+	if wantLen := last + 1 - first; len(widths) != wantLen {
+		t.Errorf("Widths() len = %d, want %d (LastChar+1-FirstChar = %d+1-%d)",
+			len(widths), wantLen, last, first)
+	}
+}
+
+// TestFontWidthsNoWidthsEntry verifies that Widths() returns an empty slice
+// when the font dictionary carries no /Widths entry.
+func TestFontWidthsNoWidthsEntry(t *testing.T) {
+	r, err := OpenBytes(buildTextPDF("BT /F1 12 Tf (Hi) Tj ET"))
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	if widths := r.Page(1).Font("F1").Widths(); len(widths) != 0 {
+		t.Errorf("Widths() on font without /Widths: got %v, want empty", widths)
+	}
+}
+
+// TestGetTextByColumnPositions verifies that text at a Td position
+// is grouped into a column keyed on the integer X coordinate.
+func TestGetTextByColumnPositions(t *testing.T) {
+	data := buildSinglePagePDF("BT\n100 700 Td\n(AB) Tj\nET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	cols, err := r.Page(1).GetTextByColumn()
+	if err != nil {
+		t.Fatalf("GetTextByColumn: %v", err)
+	}
+	if len(cols) == 0 {
+		t.Fatal("expected at least one column, got none")
+	}
+	found := false
+	for _, col := range cols {
+		for _, txt := range col.Content {
+			if txt.S == "AB" {
+				found = true
+				if txt.X != 100 {
+					t.Errorf("text X = %v, want 100", txt.X)
+				}
+				if txt.Y != 700 {
+					t.Errorf("text Y = %v, want 700", txt.Y)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("text 'AB' not found in any column")
+	}
+}
+
+// TestGetTextByColumnTwoColumns verifies that text at two distinct X positions
+// produces two separate columns ordered left to right.
+func TestGetTextByColumnTwoColumns(t *testing.T) {
+	data := buildSinglePagePDF("BT\n100 700 Td\n(Left) Tj\nET\nBT\n300 700 Td\n(Right) Tj\nET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	cols, err := r.Page(1).GetTextByColumn()
+	if err != nil {
+		t.Fatalf("GetTextByColumn: %v", err)
+	}
+	if len(cols) != 2 {
+		t.Fatalf("want 2 columns, got %d", len(cols))
+	}
+	if cols[0].Position >= cols[1].Position {
+		t.Errorf("columns not sorted left-to-right: [0].Position=%d [1].Position=%d",
+			cols[0].Position, cols[1].Position)
+	}
+	if len(cols[0].Content) != 1 || cols[0].Content[0].S != "Left" {
+		t.Errorf("col[0]: want [Left], got %v", cols[0].Content)
+	}
+	if len(cols[1].Content) != 1 || cols[1].Content[0].S != "Right" {
+		t.Errorf("col[1]: want [Right], got %v", cols[1].Content)
+	}
+}
+
+// TestGetTextByColumnSortedTopToBottom verifies that multiple texts sharing
+// the same X are sorted top to bottom (descending Y, since PDF Y increases
+// bottom-to-top).
+func TestGetTextByColumnSortedTopToBottom(t *testing.T) {
+	data := buildSinglePagePDF("BT\n100 600 Td\n(Lower) Tj\nET\nBT\n100 700 Td\n(Upper) Tj\nET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	cols, err := r.Page(1).GetTextByColumn()
+	if err != nil {
+		t.Fatalf("GetTextByColumn: %v", err)
+	}
+	if len(cols) != 1 {
+		t.Fatalf("want 1 column, got %d", len(cols))
+	}
+	content := cols[0].Content
+	if len(content) != 2 {
+		t.Fatalf("want 2 texts in column, got %d", len(content))
+	}
+	if content[0].S != "Upper" || content[1].S != "Lower" {
+		t.Errorf("want [Upper, Lower] (top-to-bottom), got [%s, %s]", content[0].S, content[1].S)
+	}
+}
+
+// TestGetTextByColumnNoEmptyEntries verifies that no empty-string Text values
+// appear in column output (mirrors TestGetTextByRowNoEmptyRows).
+func TestGetTextByColumnNoEmptyEntries(t *testing.T) {
+	data := buildSinglePagePDF("BT\n100 700 Td\n(First) Tj\n10 -20 Td\n(Second) Tj\nET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	cols, err := r.Page(1).GetTextByColumn()
+	if err != nil {
+		t.Fatalf("GetTextByColumn: %v", err)
+	}
+	for _, col := range cols {
+		for _, txt := range col.Content {
+			if txt.S == "" {
+				t.Errorf("col X=%d: unexpected empty-string Text entry", col.Position)
+			}
+		}
+	}
+}
