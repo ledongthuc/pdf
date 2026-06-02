@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"bytes"
+	"compress/zlib"
 	"fmt"
 	"strings"
 	"testing"
@@ -356,6 +357,48 @@ func TestOpenBytesEOFBeyond1024(t *testing.T) {
 	data = append(data, bytes.Repeat([]byte{'x'}, 1500)...)
 	if _, err := OpenBytes(data); err != nil {
 		t.Fatalf("OpenBytes rejected PDF with %%EOF >1024 bytes before end: %v", err)
+	}
+}
+
+// TestDecryptStringMisalignedAES verifies that decryptString returns "" rather
+// than panicking when the AES ciphertext is shorter than one block (< 16 bytes)
+// or has a tail that is not a full block multiple after the IV.
+func TestDecryptStringMisalignedAES(t *testing.T) {
+	key := make([]byte, 16)
+	if got := decryptString(key, true, objptr{}, string(make([]byte, 10))); got != "" {
+		t.Errorf("short ciphertext: want \"\", got %q", got)
+	}
+	if got := decryptString(key, true, objptr{}, string(make([]byte, 20))); got != "" {
+		t.Errorf("misaligned ciphertext (20 bytes): want \"\", got %q", got)
+	}
+}
+
+// TestEnsureXrefSlotLimit verifies that ensureXrefSlot returns an error for
+// object numbers exceeding maxXrefObjects rather than growing a huge slice.
+func TestEnsureXrefSlotLimit(t *testing.T) {
+	if _, err := ensureXrefSlot(nil, maxXrefObjects+1); err == nil {
+		t.Error("expected error for object number > maxXrefObjects, got nil")
+	}
+	if _, err := ensureXrefSlot(nil, -1); err == nil {
+		t.Error("expected error for negative object number, got nil")
+	}
+}
+
+// TestFlateDecode_ColumnsLimit verifies that applyFilter returns an error for a
+// Columns value exceeding maxPNGColumns rather than allocating a huge slice.
+func TestFlateDecode_ColumnsLimit(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	zw.Write([]byte("x"))
+	zw.Close()
+
+	r := &Reader{f: bytes.NewReader(nil), end: 0}
+	param := Value{r, objptr{}, dict{
+		name("Predictor"): int64(12),
+		name("Columns"):   int64(maxPNGColumns + 1),
+	}}
+	if _, err := applyFilter(bytes.NewReader(buf.Bytes()), "FlateDecode", param); err == nil {
+		t.Error("expected error for Columns > maxPNGColumns, got nil")
 	}
 }
 

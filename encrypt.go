@@ -235,8 +235,8 @@ func decryptString(key []byte, useAES bool, ptr objptr, x string) string {
 	key = cryptKey(key, useAES, ptr)
 	if useAES {
 		s := []byte(x)
-		if len(s) < aes.BlockSize {
-			panic("Encrypted text shorter that AES block size")
+		if len(s) < aes.BlockSize || (len(s)-aes.BlockSize)%aes.BlockSize != 0 {
+			return ""
 		}
 
 		block, _ := aes.NewCipher(key)
@@ -260,7 +260,7 @@ func decryptStream(key []byte, useAES bool, ptr objptr, rd io.Reader) io.Reader 
 	if useAES {
 		cb, err := aes.NewCipher(key)
 		if err != nil {
-			panic("AES: " + err.Error())
+			return rd
 		}
 		iv := make([]byte, 16)
 		io.ReadFull(rd, iv)

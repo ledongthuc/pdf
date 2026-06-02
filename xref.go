@@ -129,7 +129,11 @@ func processXrefEntry(buf []byte, w []int, start int64, i int, table []xref, dat
 	v2 := decodeInt(buf[w[0] : w[0]+w[1]])
 	v3 := decodeInt(buf[w[0]+w[1] : w[0]+w[1]+w[2]])
 	x := int(start) + i
-	table = ensureXrefSlot(table, x)
+	var err error
+	table, err = ensureXrefSlot(table, x)
+	if err != nil {
+		return nil, err
+	}
 	if table[x].ptr != (objptr{}) {
 		return table, nil
 	}
@@ -235,15 +239,19 @@ func applyPrevXrefTable(r *Reader, absOffset int64, table []xref) ([]xref, inter
 	return table, trailer["Prev"], nil
 }
 
-// ensureXrefSlot ensures table[x] is accessible, growing the slice if needed.
-func ensureXrefSlot(table []xref, x int) []xref {
+const maxXrefObjects = 8_388_607 // PDF spec max indirect object number
+
+func ensureXrefSlot(table []xref, x int) ([]xref, error) {
+	if x < 0 || x > maxXrefObjects {
+		return nil, fmt.Errorf("malformed PDF: xref object number out of range: %d", x)
+	}
 	for cap(table) <= x {
 		table = append(table[:cap(table)], xref{})
 	}
 	if len(table) <= x {
 		table = table[:x+1]
 	}
-	return table
+	return table, nil
 }
 
 // readXrefTableEntry reads and validates one xref table entry (offset gen alloc).
@@ -288,7 +296,10 @@ func applyXrefTableSection(b *buffer, start int64, n int64, table []xref) ([]xre
 			return nil, err
 		}
 		x := int(start) + i
-		table = ensureXrefSlot(table, x)
+		table, err = ensureXrefSlot(table, x)
+		if err != nil {
+			return nil, err
+		}
 		if alloc == "n" && table[x].offset == 0 {
 			table[x] = xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)}
 		}

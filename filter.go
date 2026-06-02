@@ -9,6 +9,9 @@ import (
 	"io"
 )
 
+const maxDecompressedSize = 256 << 20
+const maxPNGColumns = 65536
+
 type alphaReader struct {
 	reader io.Reader
 }
@@ -53,28 +56,32 @@ func (a *alphaReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func applyFilter(rd io.Reader, name string, param Value) io.Reader {
+func applyFilter(rd io.Reader, name string, param Value) (io.Reader, error) {
 	switch name {
 	default:
-		panic("unknown filter " + name)
+		return nil, fmt.Errorf("unsupported PDF filter: %s", name)
 	case "FlateDecode":
 		zr, err := zlib.NewReader(rd)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("FlateDecode: %v", err)
 		}
+		limited := io.LimitReader(zr, maxDecompressedSize)
 		pred := param.Key("Predictor")
 		if pred.Kind() == Null {
-			return zr
+			return limited, nil
 		}
 		columns := param.Key("Columns").Int64()
+		if columns > maxPNGColumns {
+			return nil, fmt.Errorf("FlateDecode: invalid Columns value: %d", columns)
+		}
 		switch pred.Int64() {
 		default:
 			if DebugOn {
 				fmt.Println("unknown predictor", pred)
 			}
-			panic("pred")
+			return nil, fmt.Errorf("unsupported FlateDecode predictor: %v", pred.Int64())
 		case 12:
-			return &pngUpReader{r: zr, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}
+			return &pngUpReader{r: limited, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}, nil
 		}
 	case "ASCII85Decode":
 		cleanASCII85 := newAlphaReader(rd)
@@ -85,9 +92,9 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 			if DebugOn {
 				fmt.Println("param=", param)
 			}
-			panic("not expected DecodeParms for ascii85")
+			return nil, fmt.Errorf("unexpected DecodeParms for ASCII85Decode")
 		case nil:
-			return decoder
+			return decoder, nil
 		}
 	}
 }

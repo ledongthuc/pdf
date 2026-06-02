@@ -249,14 +249,22 @@ func (v Value) Reader() io.ReadCloser {
 	param := v.Key("DecodeParms")
 	switch filter.Kind() {
 	default:
-		panic(fmt.Errorf("unsupported filter %v", filter))
+		return &errorReadCloser{fmt.Errorf("unsupported filter %v", filter)}
 	case Null:
 		// ok
 	case Name:
-		rd = applyFilter(rd, filter.Name(), param)
+		var err error
+		rd, err = applyFilter(rd, filter.Name(), param)
+		if err != nil {
+			return &errorReadCloser{err}
+		}
 	case Array:
 		for i := 0; i < filter.Len(); i++ {
-			rd = applyFilter(rd, filter.Index(i).Name(), param.Index(i))
+			var err error
+			rd, err = applyFilter(rd, filter.Index(i).Name(), param.Index(i))
+			if err != nil {
+				return &errorReadCloser{err}
+			}
 		}
 	}
 
