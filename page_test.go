@@ -505,3 +505,203 @@ func TestTextsMatchesGetStyledTexts(t *testing.T) {
 		}
 	}
 }
+
+// buildPDFFromObjects assembles a PDF from a slice of raw object bodies.
+// Objects are numbered 1..N; objs[0] is object 1, which must be the Catalog.
+func buildPDFFromObjects(objs []string) []byte {
+	var b strings.Builder
+	b.WriteString("%PDF-1.4\n")
+	off := make([]int, len(objs)+1)
+	for i, body := range objs {
+		off[i+1] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, body)
+	}
+	xrefOff := b.Len()
+	n := len(objs) + 1
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", n)
+	for i := 1; i < n; i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", off[i])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", n, xrefOff)
+	return []byte(b.String())
+}
+
+// formXObjStream returns a PDF stream object string for a Form XObject whose
+// content is body, with an optional Resources dict string (e.g. "<< /Font << /F1 7 0 R >> >>").
+// Pass "" for resources to get an empty Resources dict.
+func formXObjStream(body, resources string) string {
+	if resources == "" {
+		resources = "<< >>"
+	}
+	return fmt.Sprintf("<< /Type /XObject /Subtype /Form /Resources %s /Length %d >>\nstream\n%s\nendstream",
+		resources, len(body), body)
+}
+
+// TestGetPlainTextXObjectForm verifies that text inside a Form XObject
+// referenced by Do is extracted by GetPlainText.
+func TestGetPlainTextXObjectForm(t *testing.T) {
+	xobjBody := "BT (hello) Tj ET"
+	pageContent := "/Xi0 Do"
+	data := buildPDFFromObjects([]string{
+		// 1: Catalog
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		// 2: Pages
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		// 3: Page — XObject resource only, no page-level font
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Xi0 5 0 R >> >> /Contents 4 0 R >>",
+		// 4: Page content stream
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(pageContent), pageContent),
+		// 5: Form XObject
+		formXObjStream(xobjBody, ""),
+	})
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got, err := r.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText: %v", err)
+	}
+	if !strings.Contains(got, "hello") {
+		t.Errorf("GetPlainText = %q; want it to contain %q", got, "hello")
+	}
+}
+
+// TestGetPlainTextXObjectNestedFont verifies that font names inside a Form
+// XObject resolve against the XObject's own /Resources/Font dict, not the
+// parent page's font dict.  This is the critical font-rebinding test:
+// page /F1 → WinAnsiEncoding (0x80 → '€'), XObject /F1 → MacRomanEncoding
+// (0x80 → 'Ä').  GetPlainText must return "€Ä", not "€€" or "ÄÄ".
+func TestGetPlainTextXObjectNestedFont(t *testing.T) {
+	// \200 is PDF octal escape for byte 0x80.
+	pageContent := "BT /F1 12 Tf (\\200) Tj ET /Xi0 Do"
+	xobjBody := "BT /F1 12 Tf (\\200) Tj ET"
+	data := buildPDFFromObjects([]string{
+		// 1: Catalog
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		// 2: Pages
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		// 3: Page — page /F1 = WinAnsiEncoding, XObject = Xi0
+		"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 6 0 R >> /XObject << /Xi0 5 0 R >> >> /Contents 4 0 R >>",
+		// 4: Page content
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(pageContent), pageContent),
+		// 5: Form XObject with its own /F1 → MacRomanEncoding (obj 7)
+		formXObjStream(xobjBody, "<< /Font << /F1 7 0 R >> >>"),
+		// 6: Page /F1 → WinAnsiEncoding (0x80 = '€')
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+		// 7: XObject /F1 → MacRomanEncoding (0x80 = 'Ä')
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /MacRomanEncoding >>",
+	})
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got, err := r.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText: %v", err)
+	}
+	// Page uses WinAnsi so 0x80 → '€'; XObject uses MacRoman so 0x80 → 'Ä'.
+	if !strings.Contains(got, "€") {
+		t.Errorf("GetPlainText = %q; want page byte 0x80 decoded as € (WinAnsi)", got)
+	}
+	if !strings.Contains(got, "Ä") {
+		t.Errorf("GetPlainText = %q; want XObject byte 0x80 decoded as Ä (MacRoman)", got)
+	}
+}
+
+// TestGetPlainTextXObjectNested verifies that text is extracted from a Form
+// XObject that is itself referenced inside another Form XObject (two levels
+// of nesting).
+func TestGetPlainTextXObjectNested(t *testing.T) {
+	innerBody := "BT (deep) Tj ET"
+	outerBody := "/Inner Do"
+	pageContent := "/Outer Do"
+	data := buildPDFFromObjects([]string{
+		// 1: Catalog
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		// 2: Pages
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		// 3: Page — XObject Outer only
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Outer 4 0 R >> >> /Contents 5 0 R >>",
+		// 4: Outer Form XObject — contains /Inner Do
+		formXObjStream(outerBody, "<< /XObject << /Inner 6 0 R >> >>"),
+		// 5: Page content
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(pageContent), pageContent),
+		// 6: Inner Form XObject — contains actual text
+		formXObjStream(innerBody, ""),
+	})
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got, err := r.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText: %v", err)
+	}
+	if !strings.Contains(got, "deep") {
+		t.Errorf("GetPlainText = %q; want it to contain %q", got, "deep")
+	}
+}
+
+// TestGetPlainTextImageXObjectIgnored verifies that an Image XObject
+// referenced by Do is silently skipped — no panic, no garbage output.
+func TestGetPlainTextImageXObjectIgnored(t *testing.T) {
+	pageContent := "/Img0 Do"
+	data := buildPDFFromObjects([]string{
+		// 1: Catalog
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		// 2: Pages
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		// 3: Page — Image XObject only
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Img0 4 0 R >> >> /Contents 5 0 R >>",
+		// 4: Image XObject (no readable text content)
+		"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /Length 0 >>\nstream\nendstream",
+		// 5: Page content
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(pageContent), pageContent),
+	})
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got, err := r.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText: %v", err)
+	}
+	// Result must be empty (no text in image data) and must not panic.
+	if got != "" {
+		t.Errorf("GetPlainText = %q; want empty string for image-only XObject", got)
+	}
+}
+
+// TestGetStyledTextsXObjectForm verifies that text inside a Form XObject is
+// returned by GetStyledTexts, exercising the contentState.interpret "Do" path.
+// Only the text string is checked; X/Y coordinates are deferred (no /Matrix).
+func TestGetStyledTextsXObjectForm(t *testing.T) {
+	xobjBody := "BT (world) Tj ET"
+	pageContent := "/Xi0 Do"
+	data := buildPDFFromObjects([]string{
+		// 1: Catalog
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		// 2: Pages
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		// 3: Page — XObject resource only
+		"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Xi0 5 0 R >> >> /Contents 4 0 R >>",
+		// 4: Page content
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(pageContent), pageContent),
+		// 5: Form XObject
+		formXObjStream(xobjBody, ""),
+	})
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	// contentState appends one Text per glyph; join all S fields to check full word.
+	texts := r.Page(1).Content().Text
+	var got strings.Builder
+	for _, tx := range texts {
+		got.WriteString(tx.S)
+	}
+	if !strings.Contains(got.String(), "world") {
+		t.Errorf("Content().Text joined = %q; want it to contain %q", got.String(), "world")
+	}
+}

@@ -664,10 +664,16 @@ type gstate struct {
 }
 
 // plainTextState holds mutable state for the GetPlainText Interpret callback.
+// xobjMaxDepth caps Form XObject recursion to guard against malformed PDFs
+// that contain cyclic or deeply nested XObject references.
+const xobjMaxDepth = 10
+
 type plainTextState struct {
-	enc   TextEncoding
-	fonts map[string]*Font
-	buf   bytes.Buffer
+	enc       TextEncoding
+	fonts     map[string]*Font
+	buf       bytes.Buffer
+	resources Value
+	depth     int
 }
 
 func (s *plainTextState) showEncoded(str string) {
@@ -732,6 +738,23 @@ func (s *plainTextState) interpretPlain(stk *Stack, op string) {
 		s.handlePlainTf(args)
 	case "BT", "T*", "\"", "'", "Tj", "TJ":
 		s.handlePlainShow(op, args)
+	case "Do":
+		if s.depth >= xobjMaxDepth || len(args) == 0 {
+			break
+		}
+		xobj := s.resources.Key("XObject").Key(args[0].Name())
+		if xobj.Key("Subtype").Name() != "Form" {
+			break
+		}
+		xobjRes := xobj.Key("Resources")
+		sub := &plainTextState{enc: &nopEncoder{}, resources: xobjRes, depth: s.depth + 1}
+		sub.fonts = make(map[string]*Font)
+		for _, fn := range xobjRes.Key("Font").Keys() {
+			f := Font{xobjRes.Key("Font").Key(fn), nil}
+			sub.fonts[fn] = &f
+		}
+		Interpret(xobj, sub.interpretPlain)
+		s.buf.WriteString(sub.buf.String())
 	}
 }
 
@@ -755,7 +778,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 			fonts[font] = &f
 		}
 	}
-	s := &plainTextState{enc: &nopEncoder{}, fonts: fonts}
+	s := &plainTextState{enc: &nopEncoder{}, fonts: fonts, resources: p.Resources()}
 	Interpret(p.V.Key("Contents"), s.interpretPlain)
 	return s.buf.String(), nil
 }
@@ -906,11 +929,13 @@ func (p Page) GetTextByRow() (Rows, error) {
 
 // walkState holds mutable state for the walkTextBlocks Interpret callback.
 type walkState struct {
-	enc    TextEncoding
-	x, y   float64
-	tl     float64
-	fonts  map[string]*Font
-	walker func(TextEncoding, float64, float64, string)
+	enc       TextEncoding
+	x, y      float64
+	tl        float64
+	fonts     map[string]*Font
+	walker    func(TextEncoding, float64, float64, string)
+	resources Value
+	depth     int
 }
 
 func (s *walkState) handleWalkFont(op string, args []Value) {
@@ -1000,6 +1025,22 @@ func (s *walkState) interpretWalk(stk *Stack, op string) {
 		s.handleWalkShow(op, args)
 	case "Td", "TD", "Tm":
 		s.handleWalkPos(op, args)
+	case "Do":
+		if s.depth >= xobjMaxDepth || len(args) == 0 {
+			break
+		}
+		xobj := s.resources.Key("XObject").Key(args[0].Name())
+		if xobj.Key("Subtype").Name() != "Form" {
+			break
+		}
+		xobjRes := xobj.Key("Resources")
+		sub := &walkState{enc: &nopEncoder{}, resources: xobjRes, depth: s.depth + 1, walker: s.walker}
+		sub.fonts = make(map[string]*Font)
+		for _, fn := range xobjRes.Key("Font").Keys() {
+			f := Font{xobjRes.Key("Font").Key(fn), nil}
+			sub.fonts[fn] = &f
+		}
+		Interpret(xobj, sub.interpretWalk)
 	}
 }
 
@@ -1012,18 +1053,20 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 		f := p.Font(font)
 		fonts[font] = &f
 	}
-	s := &walkState{enc: &nopEncoder{}, fonts: fonts, walker: walker}
+	s := &walkState{enc: &nopEncoder{}, fonts: fonts, walker: walker, resources: p.Resources()}
 	Interpret(p.V.Key("Contents"), s.interpretWalk)
 }
 
 // contentState holds the mutable interpreter state for the Content() operator loop.
 type contentState struct {
-	g      gstate
-	enc    TextEncoding
-	text   []Text
-	rect   []Rect
-	gstack []gstate
-	p      Page
+	g         gstate
+	enc       TextEncoding
+	text      []Text
+	rect      []Rect
+	gstack    []gstate
+	p         Page
+	resources Value
+	depth     int
 }
 
 // appendText decodes str through the current encoder and appends one Text
@@ -1125,7 +1168,7 @@ func (s *contentState) handleTf(args []Value) {
 		panic("bad TL")
 	}
 	f := args[0].Name()
-	s.g.Tf = s.p.Font(f)
+	s.g.Tf = Font{s.resources.Key("Font").Key(f), nil}
 	s.enc = s.g.Tf.Encoder()
 	if s.enc == nil {
 		if DebugOn {
@@ -1230,6 +1273,25 @@ func (s *contentState) interpret(stk *Stack, op string) {
 		s.handleTextParams(op, args)
 	case "Tj", "TJ", "'", "\"":
 		s.handleTextShow(op, args)
+	case "Do":
+		if s.depth >= xobjMaxDepth || len(args) == 0 {
+			break
+		}
+		xobj := s.resources.Key("XObject").Key(args[0].Name())
+		if xobj.Key("Subtype").Name() != "Form" {
+			break
+		}
+		xobjRes := xobj.Key("Resources")
+		sub := &contentState{
+			g:         gstate{Th: 1, CTM: ident},
+			enc:       &nopEncoder{},
+			p:         s.p,
+			resources: xobjRes,
+			depth:     s.depth + 1,
+		}
+		Interpret(xobj, sub.interpret)
+		s.text = append(s.text, sub.text...)
+		s.rect = append(s.rect, sub.rect...)
 	}
 }
 
@@ -1239,9 +1301,10 @@ func (p Page) Content() Content {
 		return Content{}
 	}
 	s := &contentState{
-		g:   gstate{Th: 1, CTM: ident},
-		enc: &nopEncoder{},
-		p:   p,
+		g:         gstate{Th: 1, CTM: ident},
+		enc:       &nopEncoder{},
+		p:         p,
+		resources: p.Resources(),
 	}
 	Interpret(p.V.Key("Contents"), s.interpret)
 	return Content{s.text, s.rect}
