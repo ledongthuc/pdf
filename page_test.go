@@ -398,3 +398,110 @@ func TestPageCropBoxPresent(t *testing.T) {
 		t.Errorf("CropBox: want %v, got %v", want, got)
 	}
 }
+
+func TestPagesIterator(t *testing.T) {
+	data := buildOutlinePDF(3, "", 0, 0)
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	var indices []int
+	for i := range r.Pages() {
+		indices = append(indices, i)
+	}
+	if got, want := len(indices), 3; got != want {
+		t.Fatalf("Pages() yielded %d pages, want %d", got, want)
+	}
+	for j, idx := range indices {
+		if idx != j+1 {
+			t.Fatalf("page index[%d] = %d, want %d", j, idx, j+1)
+		}
+	}
+}
+
+func TestPagesIteratorBreak(t *testing.T) {
+	data := buildOutlinePDF(3, "", 0, 0)
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	count := 0
+	for range r.Pages() {
+		count++
+		break
+	}
+	if count != 1 {
+		t.Fatalf("Pages() yielded %d page(s) after break, want 1", count)
+	}
+}
+
+// twoBlockStream produces two BT blocks at distinct Y positions (700, 600) so
+// IsSameSentence returns false and Texts() yields exactly two elements.
+const twoBlockStream = "BT /F1 12 Tf 100 700 Td (Hello) Tj ET\nBT /F1 12 Tf 100 600 Td (World) Tj ET"
+
+func TestTextsIterator(t *testing.T) {
+	data := buildTextPDF(twoBlockStream)
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	p := r.Page(1)
+	var texts []Text
+	for text := range p.Texts() {
+		texts = append(texts, text)
+	}
+	if got, want := len(texts), 2; got != want {
+		t.Fatalf("Texts() yielded %d elements, want %d: %v", got, want, texts)
+	}
+	if !strings.Contains(texts[0].S, "Hello") {
+		t.Errorf("texts[0].S = %q, want to contain 'Hello'", texts[0].S)
+	}
+	if !strings.Contains(texts[1].S, "World") {
+		t.Errorf("texts[1].S = %q, want to contain 'World'", texts[1].S)
+	}
+}
+
+func TestTextsIteratorBreak(t *testing.T) {
+	data := buildTextPDF(twoBlockStream)
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	count := 0
+	for range r.Page(1).Texts() {
+		count++
+		break
+	}
+	if count != 1 {
+		t.Fatalf("Texts() yielded %d element(s) after break, want 1", count)
+	}
+}
+
+// TestTextsMatchesGetStyledTexts verifies that iterating Pages()+Texts() produces
+// the same sentences as GetStyledTexts — the equivalence contract stated in the doc comment.
+func TestTextsMatchesGetStyledTexts(t *testing.T) {
+	data := buildTextPDF(twoBlockStream)
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	want, err := r.GetStyledTexts()
+	if err != nil {
+		t.Fatalf("GetStyledTexts: %v", err)
+	}
+	var got []Text
+	for _, p := range r.Pages() {
+		for tx := range p.Texts() {
+			got = append(got, tx)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Pages()+Texts() len=%d, GetStyledTexts len=%d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].S != want[i].S || got[i].Font != want[i].Font ||
+			got[i].FontSize != want[i].FontSize || got[i].X != want[i].X || got[i].Y != want[i].Y {
+			t.Errorf("element[%d]: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}

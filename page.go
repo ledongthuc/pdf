@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"sort"
 	"strings"
 
@@ -111,6 +112,45 @@ func (r *Reader) GetStyledTexts() (sentences []Text, err error) {
 	}
 
 	return sentences, err
+}
+
+// Pages returns an iterator over all pages in the PDF, yielding the 1-based
+// page index and the Page value. Break exits cleanly with no goroutine leak.
+func (r *Reader) Pages() iter.Seq2[int, Page] {
+	return func(yield func(int, Page) bool) {
+		n := r.NumPage()
+		for i := 1; i <= n; i++ {
+			if !yield(i, r.Page(i)) {
+				return
+			}
+		}
+	}
+}
+
+// Texts returns an iterator over the styled text elements on the page,
+// merging adjacent runs that share the same style (font, size, position),
+// matching the output of (*Reader).GetStyledTexts. Break exits cleanly.
+func (p Page) Texts() iter.Seq[Text] {
+	return func(yield func(Text) bool) {
+		var last Text
+		for _, text := range p.Content().Text {
+			if last == (Text{}) {
+				last = text
+				continue
+			}
+			if IsSameSentence(last, text) {
+				last.S = last.S + text.S
+			} else {
+				if !yield(last) {
+					return
+				}
+				last = text
+			}
+		}
+		if len(last.S) > 0 {
+			yield(last)
+		}
+	}
 }
 
 func (p Page) findInherited(key string) Value {
