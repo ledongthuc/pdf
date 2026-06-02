@@ -69,7 +69,7 @@ func (s *contentState) handleGraphics(op string, args []Value) {
 
 func matrixFrom6Args(args []Value) matrix {
 	var m matrix
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		m[i/2][i%2] = args[i].Float64()
 	}
 	m[2][2] = 1
