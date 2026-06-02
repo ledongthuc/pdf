@@ -139,6 +139,14 @@ func (b *buffer) skipSpaceAndComments() (byte, bool) {
 	return c, false
 }
 
+// readAngleBracket dispatches '<' or '>' to the appropriate handler.
+func (b *buffer) readAngleBracket(c byte) token {
+	if c == '<' {
+		return b.readAngleBracketOpen()
+	}
+	return b.readAngleBracketClose()
+}
+
 // readAngleBracketOpen handles the '<' case: '<<' becomes the dict-open
 // keyword; anything else is a hex string.
 func (b *buffer) readAngleBracketOpen() token {
@@ -172,52 +180,53 @@ func (b *buffer) readToken() token {
 	}
 
 	switch c {
-	case '<':
-		return b.readAngleBracketOpen()
-
+	case '<', '>':
+		return b.readAngleBracket(c)
 	case '(':
 		return b.readLiteralString()
-
 	case '[', ']', '{', '}':
 		return keyword(string(c))
-
 	case '/':
 		return b.readName()
-
-	case '>':
-		return b.readAngleBracketClose()
-
 	default:
-		if isDelim(c) {
-			b.errorf("unexpected delimiter %#q", rune(c))
-			return nil
+		return b.readTokenDefault(c)
+	}
+}
+
+func (b *buffer) readTokenDefault(c byte) token {
+	if isDelim(c) {
+		b.errorf("unexpected delimiter %#q", rune(c))
+		return nil
+	}
+	b.unreadByte()
+	return b.readKeyword()
+}
+
+// readHexNibble reads the next non-space byte from b that forms part of a hex
+// string, skipping whitespace. It returns the byte and true, or 0 and false if
+// EOF was reached before a non-space byte was found.
+func (b *buffer) readHexNibble() (byte, bool) {
+	for {
+		c := b.readByte()
+		if b.eof {
+			return 0, false
 		}
-		b.unreadByte()
-		return b.readKeyword()
+		if !isSpace(c) {
+			return c, true
+		}
 	}
 }
 
 func (b *buffer) readHexString() token {
 	tmp := b.tmp[:0]
 	for {
-	Loop:
-		c := b.readByte()
-		if b.eof {
+		c, ok := b.readHexNibble()
+		if !ok || c == '>' {
 			break
 		}
-		if c == '>' {
+		c2, ok := b.readHexNibble()
+		if !ok {
 			break
-		}
-		if isSpace(c) {
-			goto Loop
-		}
-	Loop2:
-		c2 := b.readByte()
-		if b.eof {
-			break
-		}
-		if isSpace(c2) {
-			goto Loop2
 		}
 		x := unhex(c)<<4 | unhex(c2)
 		if x < 0 {
@@ -242,30 +251,33 @@ func unhex(b byte) int {
 	return -1
 }
 
+// namedEscapeByte maps a single-character escape letter to its decoded byte.
+// Returns the decoded byte and true if the escape is a recognised named escape.
+var namedEscapeByte = map[byte]byte{
+	'n': '\n',
+	'r': '\r',
+	'b': '\b',
+	't': '\t',
+	'f': '\f',
+}
+
 // appendEscape decodes the backslash-escape sequence whose character after
 // the backslash is c, appends the decoded bytes to tmp, and returns the
 // grown slice. The leading backslash has already been consumed by the caller.
 func (b *buffer) appendEscape(tmp []byte, c byte) []byte {
+	if decoded, ok := namedEscapeByte[c]; ok {
+		return append(tmp, decoded)
+	}
 	switch c {
-	default:
-		b.errorf("invalid escape sequence \\%c", c)
-		return append(tmp, '\\', c)
-	case 'n':
-		return append(tmp, '\n')
-	case 'r':
-		return append(tmp, '\r')
-	case 'b':
-		return append(tmp, '\b')
-	case 't':
-		return append(tmp, '\t')
-	case 'f':
-		return append(tmp, '\f')
 	case '(', ')', '\\':
 		return append(tmp, c)
 	case '\r', '\n':
 		return b.skipLineContinuation(tmp, c)
 	case '0', '1', '2', '3', '4', '5', '6', '7':
 		return b.appendOctalEscape(tmp, c)
+	default:
+		b.errorf("invalid escape sequence \\%c", c)
+		return append(tmp, '\\', c)
 	}
 }
 
