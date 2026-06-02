@@ -149,6 +149,16 @@ func (b *buffer) readAngleBracketOpen() token {
 	return b.readHexString()
 }
 
+// readAngleBracketClose handles the '>' case: '>>' becomes the dict-close keyword.
+func (b *buffer) readAngleBracketClose() token {
+	if b.readByte() == '>' {
+		return keyword(">>")
+	}
+	b.unreadByte()
+	b.errorf("unexpected delimiter %#q", rune('>'))
+	return nil
+}
+
 func (b *buffer) readToken() token {
 	if n := len(b.unread); n > 0 {
 		t := b.unread[n-1]
@@ -175,13 +185,7 @@ func (b *buffer) readToken() token {
 		return b.readName()
 
 	case '>':
-		if b.readByte() == '>' {
-			return keyword(">>")
-		}
-		// '>' alone is a delimiter; '<<'/'>>'-pairing is the only valid use.
-		b.unreadByte()
-		b.errorf("unexpected delimiter %#q", rune(c))
-		return nil
+		return b.readAngleBracketClose()
 
 	default:
 		if isDelim(c) {
@@ -258,16 +262,20 @@ func (b *buffer) appendEscape(tmp []byte, c byte) []byte {
 		return append(tmp, '\f')
 	case '(', ')', '\\':
 		return append(tmp, c)
-	case '\r':
-		if b.readByte() != '\n' {
-			b.unreadByte()
-		}
-		return tmp // line continuation — no character appended
-	case '\n':
-		return tmp // line continuation — no character appended
+	case '\r', '\n':
+		return b.skipLineContinuation(tmp, c)
 	case '0', '1', '2', '3', '4', '5', '6', '7':
 		return b.appendOctalEscape(tmp, c)
 	}
+}
+
+// skipLineContinuation handles a backslash-newline line continuation.
+// For \r, a following \n is consumed as part of the CRLF pair.
+func (b *buffer) skipLineContinuation(tmp []byte, c byte) []byte {
+	if c == '\r' && b.readByte() != '\n' {
+		b.unreadByte()
+	}
+	return tmp
 }
 
 // appendOctalEscape decodes a PDF octal escape \ddd (1–3 octal digits).
@@ -347,31 +355,45 @@ func (b *buffer) readKeyword() token {
 	}
 	b.tmp = tmp
 	s := string(tmp)
-	switch {
-	case s == "true":
+	switch s {
+	case "true":
 		return true
-	case s == "false":
+	case "false":
 		return false
-	case isInteger(s):
+	}
+	if t, ok := b.parseNumericToken(s); ok {
+		return t
+	}
+	return keyword(s)
+}
+
+func (b *buffer) parseNumericToken(s string) (token, bool) {
+	if isInteger(s) {
 		x, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
 			b.errorf("invalid integer %s", s)
 		}
-		return x
-	case isReal(s):
+		return x, true
+	}
+	if isReal(s) {
 		x, err := strconv.ParseFloat(s, 64)
 		if err != nil {
 			b.errorf("invalid real %s", s)
 		}
-		return x
+		return x, true
 	}
-	return keyword(string(tmp))
+	return nil, false
+}
+
+func stripSign(s string) string {
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		return s[1:]
+	}
+	return s
 }
 
 func isInteger(s string) bool {
-	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
-		s = s[1:]
-	}
+	s = stripSign(s)
 	if len(s) == 0 {
 		return false
 	}
@@ -384,9 +406,7 @@ func isInteger(s string) bool {
 }
 
 func isReal(s string) bool {
-	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
-		s = s[1:]
-	}
+	s = stripSign(s)
 	if len(s) == 0 {
 		return false
 	}
