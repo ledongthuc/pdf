@@ -82,6 +82,24 @@ func (s *contentState) applyTd(tx, ty float64) {
 	s.g.Tm = s.g.Tlm
 }
 
+// handleTd validates args and moves the text position by (tx, ty).
+func (s *contentState) handleTd(args []Value) {
+	if len(args) != 2 {
+		panic("bad Td")
+	}
+	s.applyTd(args[0].Float64(), args[1].Float64())
+}
+
+// handleTm validates args and sets both text matrices from a 6-element array.
+func (s *contentState) handleTm(args []Value) {
+	if len(args) != 6 {
+		panic("bad g.Tm")
+	}
+	m := matrixFrom6Args(args)
+	s.g.Tm = m
+	s.g.Tlm = m
+}
+
 // handleTextMatrix handles BT, ET, T*, TD, Td, and Tm operators.
 func (s *contentState) handleTextMatrix(op string, args []Value) {
 	switch op {
@@ -97,19 +115,11 @@ func (s *contentState) handleTextMatrix(op string, args []Value) {
 			panic("bad Td")
 		}
 		s.g.Tl = -args[1].Float64()
-		fallthrough
+		s.handleTd(args)
 	case "Td":
-		if len(args) != 2 {
-			panic("bad Td")
-		}
-		s.applyTd(args[0].Float64(), args[1].Float64())
+		s.handleTd(args)
 	case "Tm":
-		if len(args) != 6 {
-			panic("bad g.Tm")
-		}
-		m := matrixFrom6Args(args)
-		s.g.Tm = m
-		s.g.Tlm = m
+		s.handleTm(args)
 	}
 }
 
@@ -214,14 +224,27 @@ func (s *contentState) interpretXObject(name string) {
 	s.rect = append(s.rect, sub.rect...)
 }
 
-// interpret is the per-operator callback passed to Interpret.  It collects
-// stack arguments then dispatches to the appropriate handler.
-func (s *contentState) interpret(stk *Stack, op string) {
+// popArgs drains the stack into a slice, preserving argument order.
+func popArgs(stk *Stack) []Value {
 	n := stk.Len()
 	args := make([]Value, n)
 	for i := n - 1; i >= 0; i-- {
 		args[i] = stk.Pop()
 	}
+	return args
+}
+
+// handleDo executes the Do operator, walking Form XObjects up to the depth limit.
+func (s *contentState) handleDo(args []Value) {
+	if s.depth < xobjMaxDepth && len(args) > 0 {
+		s.interpretXObject(args[0].Name())
+	}
+}
+
+// interpret is the per-operator callback passed to Interpret.  It collects
+// stack arguments then dispatches to the appropriate handler.
+func (s *contentState) interpret(stk *Stack, op string) {
+	args := popArgs(stk)
 	switch op {
 	case "cm", "re", "q", "Q", "f", "g", "l", "m", "cs", "scn", "gs":
 		s.handleGraphics(op, args)
@@ -234,9 +257,7 @@ func (s *contentState) interpret(stk *Stack, op string) {
 	case "Tj", "TJ", "'", "\"":
 		s.handleTextShow(op, args)
 	case "Do":
-		if s.depth < xobjMaxDepth && len(args) > 0 {
-			s.interpretXObject(args[0].Name())
-		}
+		s.handleDo(args)
 	}
 }
 
