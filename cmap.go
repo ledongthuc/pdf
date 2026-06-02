@@ -200,7 +200,8 @@ func (s *cmapInterp) handleEndCodespace(stk *Stack) {
 
 func (s *cmapInterp) handleEndBfchar(stk *Stack) {
 	if s.n < 0 {
-		panic("missing beginbfchar")
+		s.ok = false
+		return
 	}
 	for i := 0; i < s.n; i++ {
 		repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
@@ -210,7 +211,8 @@ func (s *cmapInterp) handleEndBfchar(stk *Stack) {
 
 func (s *cmapInterp) handleEndBfrange(stk *Stack) {
 	if s.n < 0 {
-		panic("missing beginbfrange")
+		s.ok = false
+		return
 	}
 	for i := 0; i < s.n; i++ {
 		dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
@@ -218,12 +220,22 @@ func (s *cmapInterp) handleEndBfrange(stk *Stack) {
 	}
 }
 
+// maxCmapEntries caps the number of entries in a single CMap section.
+// The PDF spec permits at most 100 per section; we allow 65536 (full BMP) to
+// tolerate non-compliant generators while blocking resource-exhaustion attacks.
+const maxCmapEntries = 65536
+
 // interpretCmapRanges handles the codespace/bfchar/bfrange operators and the
 // debug-unknown default. Separated from interpretCmap to reduce cyclomatic complexity.
 func (s *cmapInterp) interpretCmapRanges(stk *Stack, op string) {
 	switch op {
 	case "begincodespacerange", "beginbfchar", "beginbfrange":
-		s.n = int(stk.Pop().Int64())
+		n := stk.Pop().Int64()
+		if n < 0 || n > maxCmapEntries {
+			s.ok = false
+			return
+		}
+		s.n = int(n)
 	case "endcodespacerange":
 		s.handleEndCodespace(stk)
 	case "endbfchar":

@@ -138,7 +138,7 @@ func buildOutlinePDF(numPages int, title string, destPageNum int, actionPageNum 
 		fmt.Fprintf(&b, "%010d 00000 n \n", off[i])
 	}
 
-	trailerRoot := fmt.Sprintf("/Root 1 0 R")
+	trailerRoot := "/Root 1 0 R"
 	fmt.Fprintf(&b, "trailer\n<< /Size %d %s >>\nstartxref\n%d\n%%%%EOF\n", n, trailerRoot, xrefOff)
 
 	return []byte(b.String())

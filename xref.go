@@ -43,6 +43,9 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream missing Size")
 	}
+	if size <= 0 || size > maxXrefObjects {
+		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Size out of range: %d", size)
+	}
 	table := make([]xref, size)
 	table, err := readXrefStreamData(r, strm, table, size)
 	if err != nil {
