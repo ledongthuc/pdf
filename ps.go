@@ -56,6 +56,21 @@ func openInterpBuffer(strm Value) *buffer {
 	return b
 }
 
+// execDef implements the PostScript "def" operator: pops a name key and a
+// value, then stores the pair in the top dictionary. Returns false without
+// storing if the key is not a name (silent skip per PS semantics).
+func execDef(stk *Stack, dicts *[]dict) {
+	if len(*dicts) <= 0 {
+		panic("def without open dict")
+	}
+	val := stk.Pop()
+	key, ok := stk.Pop().data.(name)
+	if !ok {
+		return
+	}
+	(*dicts)[len(*dicts)-1][key] = val.data
+}
+
 // execPS handles the built-in PostScript dict-stack operators (dict,
 // currentdict, begin, end, def, pop). Returns true if kw was consumed,
 // false if it is not a PS dict operator and must be dispatched to the
@@ -82,22 +97,30 @@ func execPS(kw string, stk *Stack, dicts *[]dict) bool {
 		}
 		*dicts = (*dicts)[:len(*dicts)-1]
 	case "def":
-		if len(*dicts) <= 0 {
-			panic("def without open dict")
-		}
-		val := stk.Pop()
-		key, ok := stk.Pop().data.(name)
-		if !ok {
-			// Skip the value if the key is not a name.
-			return true
-		}
-		(*dicts)[len(*dicts)-1][key] = val.data
+		execDef(stk, dicts)
 	case "pop":
 		stk.Pop()
 	default:
 		return false
 	}
 	return true
+}
+
+// eiKeywordTerminates reads the byte after "EI" and returns true if that byte
+// confirms a keyword boundary (whitespace, delimiter, or EOF). It unreads the
+// byte when it does not consume it, leaving the buffer position correct for
+// either outcome.
+func eiKeywordTerminates(b *buffer) bool {
+	c := b.readByte()
+	if b.eof {
+		return true
+	}
+	if isSpace(c) || isDelim(c) {
+		b.unreadByte()
+		return true
+	}
+	b.unreadByte()
+	return false
 }
 
 // skipInlineImage scans past inline image binary data until the EI keyword.
@@ -120,17 +143,9 @@ func skipInlineImage(b *buffer) {
 			b.unreadByte()
 			continue
 		}
-		// Verify the two-char sequence is truly the EI keyword
-		// (followed by whitespace, a delimiter, or EOF).
-		c3 := b.readByte()
-		if b.eof || isSpace(c3) || isDelim(c3) {
-			if !b.eof {
-				b.unreadByte()
-			}
+		if eiKeywordTerminates(b) {
 			break
 		}
-		// False positive inside image data; keep scanning.
-		b.unreadByte()
 	}
 }
 
