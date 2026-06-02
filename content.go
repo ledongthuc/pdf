@@ -50,12 +50,7 @@ func (s *contentState) handleGraphics(op string, args []Value) {
 		if len(args) != 6 {
 			panic("bad g.Tm")
 		}
-		var m matrix
-		for i := 0; i < 6; i++ {
-			m[i/2][i%2] = args[i].Float64()
-		}
-		m[2][2] = 1
-		s.g.CTM = m.mul(s.g.CTM)
+		s.g.CTM = matrixFrom6Args(args).mul(s.g.CTM)
 	case "re":
 		if len(args) != 4 {
 			panic("bad re")
@@ -72,6 +67,21 @@ func (s *contentState) handleGraphics(op string, args []Value) {
 	}
 }
 
+func matrixFrom6Args(args []Value) matrix {
+	var m matrix
+	for i := 0; i < 6; i++ {
+		m[i/2][i%2] = args[i].Float64()
+	}
+	m[2][2] = 1
+	return m
+}
+
+func (s *contentState) applyTd(tx, ty float64) {
+	x := matrix{{1, 0, 0}, {0, 1, 0}, {tx, ty, 1}}
+	s.g.Tlm = x.mul(s.g.Tlm)
+	s.g.Tm = s.g.Tlm
+}
+
 // handleTextMatrix handles BT, ET, T*, TD, Td, and Tm operators.
 func (s *contentState) handleTextMatrix(op string, args []Value) {
 	switch op {
@@ -81,9 +91,7 @@ func (s *contentState) handleTextMatrix(op string, args []Value) {
 	case "ET":
 		// no-op
 	case "T*":
-		x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -s.g.Tl, 1}}
-		s.g.Tlm = x.mul(s.g.Tlm)
-		s.g.Tm = s.g.Tlm
+		s.applyTd(0, -s.g.Tl)
 	case "TD":
 		if len(args) != 2 {
 			panic("bad Td")
@@ -94,20 +102,12 @@ func (s *contentState) handleTextMatrix(op string, args []Value) {
 		if len(args) != 2 {
 			panic("bad Td")
 		}
-		tx := args[0].Float64()
-		ty := args[1].Float64()
-		x := matrix{{1, 0, 0}, {0, 1, 0}, {tx, ty, 1}}
-		s.g.Tlm = x.mul(s.g.Tlm)
-		s.g.Tm = s.g.Tlm
+		s.applyTd(args[0].Float64(), args[1].Float64())
 	case "Tm":
 		if len(args) != 6 {
 			panic("bad g.Tm")
 		}
-		var m matrix
-		for i := 0; i < 6; i++ {
-			m[i/2][i%2] = args[i].Float64()
-		}
-		m[2][2] = 1
+		m := matrixFrom6Args(args)
 		s.g.Tm = m
 		s.g.Tlm = m
 	}
@@ -130,39 +130,41 @@ func (s *contentState) handleTf(args []Value) {
 	s.g.Tfs = args[1].Float64()
 }
 
+func requireOneArg(args []Value, op string) {
+	if len(args) != 1 {
+		panic("bad " + op)
+	}
+}
+
 // handleTextParams handles scalar text-state operators: Tc, TL, Tr, Ts, Tw, Tz.
 func (s *contentState) handleTextParams(op string, args []Value) {
+	requireOneArg(args, op)
 	switch op {
 	case "Tc":
-		if len(args) != 1 {
-			panic("bad g.Tc")
-		}
 		s.g.Tc = args[0].Float64()
 	case "TL":
-		if len(args) != 1 {
-			panic("bad TL")
-		}
 		s.g.Tl = args[0].Float64()
 	case "Tr":
-		if len(args) != 1 {
-			panic("bad Tr")
-		}
 		s.g.Tmode = int(args[0].Int64())
 	case "Ts":
-		if len(args) != 1 {
-			panic("bad Ts")
-		}
 		s.g.Trise = args[0].Float64()
 	case "Tw":
-		if len(args) != 1 {
-			panic("bad g.Tw")
-		}
 		s.g.Tw = args[0].Float64()
 	case "Tz":
-		if len(args) != 1 {
-			panic("bad Tz")
-		}
 		s.g.Th = args[0].Float64() / 100
+	}
+}
+
+// interpretTJArray handles the TJ operand array; numeric elements are kerning offsets.
+func (s *contentState) interpretTJArray(v Value) {
+	for i := 0; i < v.Len(); i++ {
+		x := v.Index(i)
+		if x.Kind() == String {
+			s.appendText(x.RawString())
+		} else {
+			tx := -x.Float64() / 1000 * s.g.Tfs * s.g.Th
+			s.g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(s.g.Tm)
+		}
 	}
 }
 
@@ -181,9 +183,7 @@ func (s *contentState) handleTextShow(op string, args []Value) {
 		if len(args) != 1 {
 			panic("bad ' operator")
 		}
-		x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -s.g.Tl, 1}}
-		s.g.Tlm = x.mul(s.g.Tlm)
-		s.g.Tm = s.g.Tlm
+		s.applyTd(0, -s.g.Tl)
 		fallthrough
 	case "Tj":
 		if len(args) != 1 {
@@ -191,18 +191,27 @@ func (s *contentState) handleTextShow(op string, args []Value) {
 		}
 		s.appendText(args[0].RawString())
 	case "TJ":
-		v := args[0]
-		for i := 0; i < v.Len(); i++ {
-			x := v.Index(i)
-			if x.Kind() == String {
-				s.appendText(x.RawString())
-			} else {
-				tx := -x.Float64() / 1000 * s.g.Tfs * s.g.Th
-				s.g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(s.g.Tm)
-			}
-		}
+		s.interpretTJArray(args[0])
 		s.appendText("\n")
 	}
+}
+
+// interpretXObject is the Do operator body; only Form XObjects are walked.
+func (s *contentState) interpretXObject(name string) {
+	xobj := s.resources.Key("XObject").Key(name)
+	if xobj.Key("Subtype").Name() != "Form" {
+		return
+	}
+	sub := &contentState{
+		g:         gstate{Th: 1, CTM: ident},
+		enc:       &nopEncoder{},
+		p:         s.p,
+		resources: xobj.Key("Resources"),
+		depth:     s.depth + 1,
+	}
+	Interpret(xobj, sub.interpret)
+	s.text = append(s.text, sub.text...)
+	s.rect = append(s.rect, sub.rect...)
 }
 
 // interpret is the per-operator callback passed to Interpret.  It collects
@@ -225,24 +234,9 @@ func (s *contentState) interpret(stk *Stack, op string) {
 	case "Tj", "TJ", "'", "\"":
 		s.handleTextShow(op, args)
 	case "Do":
-		if s.depth >= xobjMaxDepth || len(args) == 0 {
-			break
+		if s.depth < xobjMaxDepth && len(args) > 0 {
+			s.interpretXObject(args[0].Name())
 		}
-		xobj := s.resources.Key("XObject").Key(args[0].Name())
-		if xobj.Key("Subtype").Name() != "Form" {
-			break
-		}
-		xobjRes := xobj.Key("Resources")
-		sub := &contentState{
-			g:         gstate{Th: 1, CTM: ident},
-			enc:       &nopEncoder{},
-			p:         s.p,
-			resources: xobjRes,
-			depth:     s.depth + 1,
-		}
-		Interpret(xobj, sub.interpret)
-		s.text = append(s.text, sub.text...)
-		s.rect = append(s.rect, sub.rect...)
 	}
 }
 
