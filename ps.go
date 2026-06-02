@@ -71,6 +71,33 @@ func execDef(stk *Stack, dicts *[]dict) {
 	(*dicts)[len(*dicts)-1][key] = val.data
 }
 
+func psDict(stk *Stack) {
+	stk.Pop()
+	stk.Push(Value{nil, objptr{}, make(dict)})
+}
+
+func psCurrentdict(stk *Stack, dicts *[]dict) {
+	if len(*dicts) == 0 {
+		panic("no current dictionary")
+	}
+	stk.Push(Value{nil, objptr{}, (*dicts)[len(*dicts)-1]})
+}
+
+func psBegin(stk *Stack, dicts *[]dict) {
+	d := stk.Pop()
+	if d.Kind() != Dict {
+		panic("cannot begin non-dict")
+	}
+	*dicts = append(*dicts, d.data.(dict))
+}
+
+func psEnd(dicts *[]dict) {
+	if len(*dicts) <= 0 {
+		panic("mismatched begin/end")
+	}
+	*dicts = (*dicts)[:len(*dicts)-1]
+}
+
 // execPS handles the built-in PostScript dict-stack operators (dict,
 // currentdict, begin, end, def, pop). Returns true if kw was consumed,
 // false if it is not a PS dict operator and must be dispatched to the
@@ -78,24 +105,13 @@ func execDef(stk *Stack, dicts *[]dict) {
 func execPS(kw string, stk *Stack, dicts *[]dict) bool {
 	switch kw {
 	case "dict":
-		stk.Pop()
-		stk.Push(Value{nil, objptr{}, make(dict)})
+		psDict(stk)
 	case "currentdict":
-		if len(*dicts) == 0 {
-			panic("no current dictionary")
-		}
-		stk.Push(Value{nil, objptr{}, (*dicts)[len(*dicts)-1]})
+		psCurrentdict(stk, dicts)
 	case "begin":
-		d := stk.Pop()
-		if d.Kind() != Dict {
-			panic("cannot begin non-dict")
-		}
-		*dicts = append(*dicts, d.data.(dict))
+		psBegin(stk, dicts)
 	case "end":
-		if len(*dicts) <= 0 {
-			panic("mismatched begin/end")
-		}
-		*dicts = (*dicts)[:len(*dicts)-1]
+		psEnd(dicts)
 	case "def":
 		execDef(stk, dicts)
 	case "pop":
@@ -149,6 +165,43 @@ func skipInlineImage(b *buffer) {
 	}
 }
 
+// lookupInDicts searches dicts from innermost to outermost for kw and pushes
+// the found value onto stk. Returns true if found, false otherwise.
+func lookupInDicts(kw keyword, stk *Stack, dicts []dict) bool {
+	for i := len(dicts) - 1; i >= 0; i-- {
+		if v, ok := dicts[i][name(kw)]; ok {
+			stk.Push(Value{nil, objptr{}, v})
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchKeyword executes one keyword token from the PostScript stream.
+// Returns true if the caller's main loop should continue to the next token
+// (i.e. a dict lookup matched and the value was pushed), false to fall through.
+func dispatchKeyword(kw keyword, stk *Stack, dicts *[]dict, b *buffer, do func(stk *Stack, op string)) bool {
+	switch kw {
+	// "null", "[", "]", "<<", ">>" are PDF structural tokens that must be
+	// re-read as full objects via readObject — do not dispatch to do() or execPS.
+	case "null", "[", "]", "<<", ">>":
+		b.unreadToken(kw)
+		stk.Push(Value{nil, objptr{}, b.readObject()})
+	case "ID":
+		skipInlineImage(b)
+		do(stk, "EI")
+	default:
+		if execPS(string(kw), stk, dicts) {
+			return false
+		}
+		if lookupInDicts(kw, stk, *dicts) {
+			return true
+		}
+		do(stk, string(kw))
+	}
+	return false
+}
+
 // Interpret interprets the content in a stream as a basic PostScript program,
 // pushing values onto a stack and then calling the do function to execute
 // operators. The do function may push or pop values from the stack as needed
@@ -170,7 +223,6 @@ func Interpret(strm Value, do func(stk *Stack, op string)) {
 	var dicts []dict
 	b := openInterpBuffer(strm)
 
-Reading:
 	for {
 		tok := b.readToken()
 		if tok == io.EOF {
@@ -182,26 +234,6 @@ Reading:
 			stk.Push(Value{nil, objptr{}, b.readObject()})
 			continue
 		}
-		switch kw {
-		// "null", "[", "]", "<<", ">>" are PDF structural tokens that must be
-		// re-read as full objects via readObject — do not dispatch to do() or execPS.
-		case "null", "[", "]", "<<", ">>":
-			b.unreadToken(tok)
-			stk.Push(Value{nil, objptr{}, b.readObject()})
-		case "ID":
-			skipInlineImage(b)
-			do(&stk, "EI")
-		default:
-			if execPS(string(kw), &stk, &dicts) {
-				continue
-			}
-			for i := len(dicts) - 1; i >= 0; i-- {
-				if v, ok := dicts[i][name(kw)]; ok {
-					stk.Push(Value{nil, objptr{}, v})
-					continue Reading
-				}
-			}
-			do(&stk, string(kw))
-		}
+		dispatchKeyword(kw, &stk, &dicts, b, do)
 	}
 }
