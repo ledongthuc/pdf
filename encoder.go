@@ -69,37 +69,55 @@ func (e *byteEncoder) Decode(raw string) (text string) {
 	return string(r)
 }
 
+// cmapEncoderTable maps each predefined PDF CMap/Encoding name to its TextEncoding.
+// Encoders are stateless singletons; keys that share a charset share the same pointer.
+var cmapEncoderTable = func() map[string]TextEncoding {
+	shiftJIS := &multibyteCMapEncoder{japanese.ShiftJIS}
+	gbk := &multibyteCMapEncoder{simplifiedchinese.GBK}
+	big5 := &multibyteCMapEncoder{traditionalchinese.Big5}
+	euckr := &multibyteCMapEncoder{korean.EUCKR}
+	ucs2 := &ucs2BEEncoder{}
+	return map[string]TextEncoding{
+		"WinAnsiEncoding":  &byteEncoder{&winAnsiEncoding},
+		"MacRomanEncoding": &byteEncoder{&macRomanEncoding},
+		"Identity-H":       &byteEncoder{&pdfDocEncoding},
+		"90ms-RKSJ-H":      shiftJIS,
+		"90ms-RKSJ-V":      shiftJIS,
+		"90pv-RKSJ-H":      shiftJIS,
+		"UniGB-UCS2-H":     ucs2,
+		"UniGB-UCS2-V":     ucs2,
+		"UniCNS-UCS2-H":    ucs2,
+		"UniCNS-UCS2-V":    ucs2,
+		"UniJIS-UCS2-H":    ucs2,
+		"UniJIS-UCS2-V":    ucs2,
+		"UniKS-UCS2-H":     ucs2,
+		"UniKS-UCS2-V":     ucs2,
+		"GB-EUC-H":         gbk,
+		"GB-EUC-V":         gbk,
+		"GBKp-EUC-H":       gbk,
+		"GBKp-EUC-V":       gbk,
+		"GBK-EUC-H":        gbk,
+		"GBK-EUC-V":        gbk,
+		"ETen-B5-H":        big5,
+		"ETen-B5-V":        big5,
+		"ETenms-B5-H":      big5,
+		"ETenms-B5-V":      big5,
+		"KSCms-UHC-H":      euckr,
+		"KSCms-UHC-V":      euckr,
+		"KSC-EUC-H":        euckr,
+		"KSC-EUC-V":        euckr,
+		"KSCms-UHC-HW-H":   euckr,
+		"KSCms-UHC-HW-V":   euckr,
+	}
+}()
+
 // encoderForCMapName returns the TextEncoding for a named PDF CMap/Encoding.
 func encoderForCMapName(n string) TextEncoding {
-	switch n {
-	case "WinAnsiEncoding":
-		return &byteEncoder{&winAnsiEncoding}
-	case "MacRomanEncoding":
-		return &byteEncoder{&macRomanEncoding}
-	case "Identity-H":
-		return &byteEncoder{&pdfDocEncoding}
-	case "90ms-RKSJ-H", "90ms-RKSJ-V", "90pv-RKSJ-H":
-		return &multibyteCMapEncoder{japanese.ShiftJIS}
-	case "UniGB-UCS2-H", "UniGB-UCS2-V",
-		"UniCNS-UCS2-H", "UniCNS-UCS2-V",
-		"UniJIS-UCS2-H", "UniJIS-UCS2-V",
-		"UniKS-UCS2-H", "UniKS-UCS2-V":
-		return &ucs2BEEncoder{}
-	case "GB-EUC-H", "GB-EUC-V",
-		"GBKp-EUC-H", "GBKp-EUC-V",
-		"GBK-EUC-H", "GBK-EUC-V":
-		return &multibyteCMapEncoder{simplifiedchinese.GBK}
-	case "ETen-B5-H", "ETen-B5-V",
-		"ETenms-B5-H", "ETenms-B5-V":
-		return &multibyteCMapEncoder{traditionalchinese.Big5}
-	case "KSCms-UHC-H", "KSCms-UHC-V",
-		"KSC-EUC-H", "KSC-EUC-V",
-		"KSCms-UHC-HW-H", "KSCms-UHC-HW-V":
-		return &multibyteCMapEncoder{korean.EUCKR}
-	default:
-		if DebugOn {
-			println("unknown encoding", n)
-		}
-		return &byteEncoder{&pdfDocEncoding}
+	if enc, ok := cmapEncoderTable[n]; ok {
+		return enc
 	}
+	if DebugOn {
+		println("unknown encoding", n)
+	}
+	return &byteEncoder{&pdfDocEncoding}
 }
