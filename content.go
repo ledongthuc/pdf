@@ -165,15 +165,29 @@ func (s *contentState) handleTextParams(op string, args []Value) {
 	}
 }
 
+// tjSpaceThreshold is the minimum TJ kerning magnitude (in thousandths of a
+// text-space unit) that is treated as a word-boundary gap. Values at or beyond
+// this threshold cause a synthetic space to be emitted before the next string
+// segment. 120 is a conservative word-gap threshold (unidoc/unipdf #524).
+const tjSpaceThreshold = 120.0
+
 // interpretTJArray handles the TJ operand array; numeric elements are kerning offsets.
 func (s *contentState) interpretTJArray(v Value) {
+	needSpace := false
 	for i := 0; i < v.Len(); i++ {
 		x := v.Index(i)
 		if x.Kind() == String {
+			if needSpace {
+				s.appendText(" ")
+				needSpace = false
+			}
 			s.appendText(x.RawString())
 		} else {
 			tx := -x.Float64() / 1000 * s.g.Tfs * s.g.Th
 			s.g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(s.g.Tm)
+			if x.Float64() <= -tjSpaceThreshold {
+				needSpace = true
+			}
 		}
 	}
 }
