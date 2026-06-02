@@ -198,9 +198,42 @@ func (f Font) Encoder() TextEncoding {
 	return f.enc
 }
 
+// encoderForCMapName returns the TextEncoding for a named PDF CMap/Encoding.
+func encoderForCMapName(n string) TextEncoding {
+	switch n {
+	case "WinAnsiEncoding":
+		return &byteEncoder{&winAnsiEncoding}
+	case "MacRomanEncoding":
+		return &byteEncoder{&macRomanEncoding}
+	case "Identity-H":
+		return &byteEncoder{&pdfDocEncoding}
+	case "90ms-RKSJ-H", "90ms-RKSJ-V", "90pv-RKSJ-H":
+		return &multibyteCMapEncoder{japanese.ShiftJIS}
+	case "UniGB-UCS2-H", "UniGB-UCS2-V",
+		"UniCNS-UCS2-H", "UniCNS-UCS2-V",
+		"UniJIS-UCS2-H", "UniJIS-UCS2-V",
+		"UniKS-UCS2-H", "UniKS-UCS2-V":
+		return &ucs2BEEncoder{}
+	case "GB-EUC-H", "GB-EUC-V",
+		"GBKp-EUC-H", "GBKp-EUC-V",
+		"GBK-EUC-H", "GBK-EUC-V":
+		return &multibyteCMapEncoder{simplifiedchinese.GBK}
+	case "ETen-B5-H", "ETen-B5-V",
+		"ETenms-B5-H", "ETenms-B5-V":
+		return &multibyteCMapEncoder{traditionalchinese.Big5}
+	case "KSCms-UHC-H", "KSCms-UHC-V",
+		"KSC-EUC-H", "KSC-EUC-V",
+		"KSCms-UHC-HW-H", "KSCms-UHC-HW-V":
+		return &multibyteCMapEncoder{korean.EUCKR}
+	default:
+		if DebugOn {
+			println("unknown encoding", n)
+		}
+		return &byteEncoder{&pdfDocEncoding}
+	}
+}
+
 func (f Font) getEncoder() TextEncoding {
-	// Check ToUnicode first - it's the authoritative character mapping
-	// per PDF spec and takes precedence over Encoding
 	toUnicode := f.V.Key("ToUnicode")
 	if toUnicode.Kind() == Stream {
 		if m := readCmap(toUnicode); m != nil {
@@ -210,41 +243,10 @@ func (f Font) getEncoder() TextEncoding {
 			println("ToUnicode stream failed to parse, falling back to Encoding")
 		}
 	}
-
 	enc := f.V.Key("Encoding")
 	switch enc.Kind() {
 	case Name:
-		switch enc.Name() {
-		case "WinAnsiEncoding":
-			return &byteEncoder{&winAnsiEncoding}
-		case "MacRomanEncoding":
-			return &byteEncoder{&macRomanEncoding}
-		case "Identity-H":
-			return &byteEncoder{&pdfDocEncoding}
-		case "90ms-RKSJ-H", "90ms-RKSJ-V", "90pv-RKSJ-H":
-			return &multibyteCMapEncoder{japanese.ShiftJIS}
-		case "UniGB-UCS2-H", "UniGB-UCS2-V",
-			"UniCNS-UCS2-H", "UniCNS-UCS2-V",
-			"UniJIS-UCS2-H", "UniJIS-UCS2-V",
-			"UniKS-UCS2-H", "UniKS-UCS2-V":
-			return &ucs2BEEncoder{}
-		case "GB-EUC-H", "GB-EUC-V",
-			"GBKp-EUC-H", "GBKp-EUC-V",
-			"GBK-EUC-H", "GBK-EUC-V":
-			return &multibyteCMapEncoder{simplifiedchinese.GBK}
-		case "ETen-B5-H", "ETen-B5-V",
-			"ETenms-B5-H", "ETenms-B5-V":
-			return &multibyteCMapEncoder{traditionalchinese.Big5}
-		case "KSCms-UHC-H", "KSCms-UHC-V",
-			"KSC-EUC-H", "KSC-EUC-V",
-			"KSCms-UHC-HW-H", "KSCms-UHC-HW-V":
-			return &multibyteCMapEncoder{korean.EUCKR}
-		default:
-			if DebugOn {
-				println("unknown encoding", enc.Name())
-			}
-			return &byteEncoder{&pdfDocEncoding}
-		}
+		return encoderForCMapName(enc.Name())
 	case Dict:
 		return newDictEncoder(enc)
 	case Null:
@@ -384,52 +386,65 @@ type cmap struct {
 	bfchar  []bfchar
 }
 
+// lookupBfchar searches m.bfchar for an entry of length n matching text.
+func (m *cmap) lookupBfchar(text string, n int) ([]rune, bool) {
+	for _, bfchar := range m.bfchar {
+		if len(bfchar.orig) == n && bfchar.orig == text {
+			return []rune(utf16Decode(bfchar.repl)), true
+		}
+	}
+	return nil, false
+}
+
+// lookupBfrange searches m.bfrange for an entry of length n whose range contains text.
+func (m *cmap) lookupBfrange(text string, n int) ([]rune, bool) {
+	for _, bfrange := range m.bfrange {
+		if len(bfrange.lo) == n && bfrange.lo <= text && text <= bfrange.hi {
+			if bfrange.dst.Kind() == String {
+				s := bfrange.dst.RawString()
+				if bfrange.lo != text {
+					b := []byte(s)
+					b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
+					s = string(b)
+				}
+				return []rune(utf16Decode(s)), true
+			}
+			if bfrange.dst.Kind() == Array {
+				idx := text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
+				v := bfrange.dst.Index(int(idx))
+				if v.Kind() == String {
+					return []rune(utf16Decode(v.RawString())), true
+				}
+				if DebugOn {
+					fmt.Printf("array %v\n", bfrange.dst)
+				}
+			} else {
+				if DebugOn {
+					fmt.Printf("unknown dst %v\n", bfrange.dst)
+				}
+			}
+			return []rune{noRune}, true
+		}
+	}
+	return nil, false
+}
+
 func (m *cmap) Decode(raw string) (text string) {
 	var r []rune
 Parse:
 	for len(raw) > 0 {
-		for n := 1; n <= 4 && n <= len(raw); n++ { // number of digits in character replacement (1-4 possible)
-			for _, space := range m.space[n-1] { // find matching codespace Ranges for number of digits
-				if space.low <= raw[:n] && raw[:n] <= space.high { // see if value is in range
+		for n := 1; n <= 4 && n <= len(raw); n++ {
+			for _, space := range m.space[n-1] {
+				if space.low <= raw[:n] && raw[:n] <= space.high {
 					text := raw[:n]
 					raw = raw[n:]
-					for _, bfchar := range m.bfchar { // check for matching bfchar
-						if len(bfchar.orig) == n && bfchar.orig == text {
-							r = append(r, []rune(utf16Decode(bfchar.repl))...)
-							continue Parse
-						}
+					if runes, ok := m.lookupBfchar(text, n); ok {
+						r = append(r, runes...)
+						continue Parse
 					}
-					for _, bfrange := range m.bfrange { // check for matching bfrange
-						if len(bfrange.lo) == n && bfrange.lo <= text && text <= bfrange.hi {
-							if bfrange.dst.Kind() == String {
-								s := bfrange.dst.RawString()
-								if bfrange.lo != text { // value isn't at the beginning of the range so scale result
-									b := []byte(s)
-									b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1] // increment last byte by difference
-									s = string(b)
-								}
-								r = append(r, []rune(utf16Decode(s))...)
-								continue Parse
-							}
-							if bfrange.dst.Kind() == Array {
-								n := text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
-								v := bfrange.dst.Index(int(n))
-								if v.Kind() == String {
-									s := v.RawString()
-									r = append(r, []rune(utf16Decode(s))...)
-									continue Parse
-								}
-								if DebugOn {
-									fmt.Printf("array %v\n", bfrange.dst)
-								}
-							} else {
-								if DebugOn {
-									fmt.Printf("unknown dst %v\n", bfrange.dst)
-								}
-							}
-							r = append(r, noRune)
-							continue Parse
-						}
+					if runes, ok := m.lookupBfrange(text, n); ok {
+						r = append(r, runes...)
+						continue Parse
 					}
 					r = append(r, noRune)
 					continue Parse
@@ -445,80 +460,99 @@ Parse:
 	return string(r)
 }
 
-func readCmap(toUnicode Value) *cmap {
-	n := -1
-	var m cmap
-	ok := true
-	Interpret(toUnicode, func(stk *Stack, op string) {
-		if !ok {
+// cmapInterp holds mutable state for the readCmap Interpret callback.
+type cmapInterp struct {
+	n  int
+	m  cmap
+	ok bool
+}
+
+func (s *cmapInterp) handleEndCodespace(stk *Stack) {
+	if s.n < 0 {
+		if DebugOn {
+			println("missing begincodespacerange")
+		}
+		s.ok = false
+		return
+	}
+	for i := 0; i < s.n; i++ {
+		hi, lo := stk.Pop().RawString(), stk.Pop().RawString()
+		if len(lo) == 0 || len(lo) != len(hi) {
+			if DebugOn {
+				println("bad codespace range")
+			}
+			s.ok = false
 			return
 		}
-		switch op {
-		case "findresource":
-			stk.Pop() // category
-			stk.Pop() // key
-			stk.Push(newDict())
-		case "begincmap":
-			stk.Push(newDict())
-		case "endcmap":
-			stk.Pop()
-		case "begincodespacerange":
-			n = int(stk.Pop().Int64())
-		case "endcodespacerange":
-			if n < 0 {
-				if DebugOn {
-					println("missing begincodespacerange")
-				}
-				ok = false
-				return
-			}
-			for i := 0; i < n; i++ {
-				hi, lo := stk.Pop().RawString(), stk.Pop().RawString()
-				if len(lo) == 0 || len(lo) != len(hi) {
-					if DebugOn {
-						println("bad codespace range")
-					}
-					ok = false
-					return
-				}
-				m.space[len(lo)-1] = append(m.space[len(lo)-1], byteRange{lo, hi})
-			}
-			n = -1
-		case "beginbfchar":
-			n = int(stk.Pop().Int64())
-		case "endbfchar":
-			if n < 0 {
-				panic("missing beginbfchar")
-			}
-			for i := 0; i < n; i++ {
-				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
-				m.bfchar = append(m.bfchar, bfchar{orig, repl})
-			}
-		case "beginbfrange":
-			n = int(stk.Pop().Int64())
-		case "endbfrange":
-			if n < 0 {
-				panic("missing beginbfrange")
-			}
-			for i := 0; i < n; i++ {
-				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
-				m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
-			}
-		case "defineresource":
-			stk.Pop().Name() // category
-			value := stk.Pop()
-			stk.Pop().Name() // key
-			stk.Push(value)
-		default:
-			if DebugOn {
-				println("interp\t", op)
-			}
+		s.m.space[len(lo)-1] = append(s.m.space[len(lo)-1], byteRange{lo, hi})
+	}
+	s.n = -1
+}
+
+func (s *cmapInterp) handleEndBfchar(stk *Stack) {
+	if s.n < 0 {
+		panic("missing beginbfchar")
+	}
+	for i := 0; i < s.n; i++ {
+		repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
+		s.m.bfchar = append(s.m.bfchar, bfchar{orig, repl})
+	}
+}
+
+func (s *cmapInterp) handleEndBfrange(stk *Stack) {
+	if s.n < 0 {
+		panic("missing beginbfrange")
+	}
+	for i := 0; i < s.n; i++ {
+		dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
+		s.m.bfrange = append(s.m.bfrange, bfrange{srcLo, srcHi, dst})
+	}
+}
+
+func (s *cmapInterp) interpretCmap(stk *Stack, op string) {
+	if !s.ok {
+		return
+	}
+	switch op {
+	case "findresource":
+		stk.Pop()
+		stk.Pop()
+		stk.Push(newDict())
+	case "begincmap":
+		stk.Push(newDict())
+	case "endcmap":
+		stk.Pop()
+	case "begincodespacerange":
+		s.n = int(stk.Pop().Int64())
+	case "endcodespacerange":
+		s.handleEndCodespace(stk)
+	case "beginbfchar":
+		s.n = int(stk.Pop().Int64())
+	case "endbfchar":
+		s.handleEndBfchar(stk)
+	case "beginbfrange":
+		s.n = int(stk.Pop().Int64())
+	case "endbfrange":
+		s.handleEndBfrange(stk)
+	case "defineresource":
+		stk.Pop().Name()
+		value := stk.Pop()
+		stk.Pop().Name()
+		stk.Push(value)
+	default:
+		if DebugOn {
+			println("interp\t", op)
 		}
-	})
-	if !ok {
+	}
+}
+
+func readCmap(toUnicode Value) *cmap {
+	s := &cmapInterp{n: -1, ok: true}
+	Interpret(toUnicode, s.interpretCmap)
+	if !s.ok {
 		return nil
 	}
-	return &m
+	return &s.m
 }
 
 type matrix [3][3]float64
@@ -579,6 +613,78 @@ type gstate struct {
 	CTM   matrix
 }
 
+// plainTextState holds mutable state for the GetPlainText Interpret callback.
+type plainTextState struct {
+	enc   TextEncoding
+	fonts map[string]*Font
+	buf   bytes.Buffer
+}
+
+func (s *plainTextState) showEncoded(str string) {
+	for _, ch := range s.enc.Decode(str) {
+		_, err := s.buf.WriteRune(ch)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func (s *plainTextState) handlePlainTf(args []Value) {
+	if len(args) != 2 {
+		panic("bad TL")
+	}
+	if font, ok := s.fonts[args[0].Name()]; ok {
+		s.enc = font.Encoder()
+	} else {
+		s.enc = &nopEncoder{}
+	}
+}
+
+func (s *plainTextState) handlePlainShow(op string, args []Value) {
+	switch op {
+	case "BT":
+	case "T*":
+		s.showEncoded("\n")
+	case "\"":
+		if len(args) != 3 {
+			panic("bad \" operator")
+		}
+		fallthrough
+	case "'":
+		if len(args) != 1 {
+			panic("bad ' operator")
+		}
+		fallthrough
+	case "Tj":
+		if len(args) != 1 {
+			panic("bad Tj operator")
+		}
+		s.showEncoded(args[0].RawString())
+	case "TJ":
+		v := args[0]
+		for i := 0; i < v.Len(); i++ {
+			x := v.Index(i)
+			if x.Kind() == String {
+				s.showEncoded(x.RawString())
+			}
+		}
+	}
+}
+
+func (s *plainTextState) interpretPlain(stk *Stack, op string) {
+	n := stk.Len()
+	args := make([]Value, n)
+	for i := n - 1; i >= 0; i-- {
+		args[i] = stk.Pop()
+	}
+	switch op {
+	case "Tf":
+		s.handlePlainTf(args)
+	case "BT", "T*", "\"", "'", "Tj", "TJ":
+		s.handlePlainShow(op, args)
+	}
+}
+
 // GetPlainText returns the page's all text without format.
 // fonts can be passed in (to improve parsing performance) or left nil
 func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
@@ -589,13 +695,9 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		}
 	}()
 
-	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return "", nil
 	}
-	strm := p.V.Key("Contents")
-	var enc TextEncoding = &nopEncoder{}
-
 	if fonts == nil {
 		fonts = make(map[string]*Font)
 		for _, font := range p.Fonts() {
@@ -603,67 +705,9 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 			fonts[font] = &f
 		}
 	}
-
-	var textBuilder bytes.Buffer
-	showEncodedText := func(s string) {
-		for _, ch := range enc.Decode(s) {
-			_, err := textBuilder.WriteRune(ch)
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
-
-	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
-
-		switch op {
-		default:
-			// Easier debug
-			// fmt.Println("<DEBUG><op>", op, "</op><args>", args, "</args>")
-			return
-		case "BT": // begin text object — no whitespace emitted
-		case "T*": // move to start of next line
-			showEncodedText("\n")
-		case "Tf": // set text font and size
-			if len(args) != 2 {
-				panic("bad TL")
-			}
-			if font, ok := fonts[args[0].Name()]; ok {
-				enc = font.Encoder()
-			} else {
-				enc = &nopEncoder{}
-			}
-		case "\"": // set spacing, move to next line, and show text
-			if len(args) != 3 {
-				panic("bad \" operator")
-			}
-			fallthrough
-		case "'": // move to next line and show text
-			if len(args) != 1 {
-				panic("bad ' operator")
-			}
-			fallthrough
-		case "Tj": // show text
-			if len(args) != 1 {
-				panic("bad Tj operator")
-			}
-			showEncodedText(args[0].RawString())
-		case "TJ": // show text, allowing individual glyph positioning
-			v := args[0]
-			for i := 0; i < v.Len(); i++ {
-				x := v.Index(i)
-				if x.Kind() == String {
-					showEncodedText(x.RawString())
-				}
-			}
-		}
-	})
-	return textBuilder.String(), nil
+	s := &plainTextState{enc: &nopEncoder{}, fonts: fonts}
+	Interpret(p.V.Key("Contents"), s.interpretPlain)
+	return s.buf.String(), nil
 }
 
 // Column represents the contents of a column
@@ -810,99 +854,116 @@ func (p Page) GetTextByRow() (Rows, error) {
 	return result, err
 }
 
+// walkState holds mutable state for the walkTextBlocks Interpret callback.
+type walkState struct {
+	enc    TextEncoding
+	x, y   float64
+	tl     float64
+	fonts  map[string]*Font
+	walker func(TextEncoding, float64, float64, string)
+}
+
+func (s *walkState) handleWalkFont(op string, args []Value) {
+	switch op {
+	case "BT":
+		s.x = 0
+		s.y = 0
+	case "T*":
+		s.y -= s.tl
+	case "TL":
+		if len(args) != 1 {
+			return
+		}
+		s.tl = args[0].Float64()
+	case "Tf":
+		if len(args) != 2 {
+			panic("bad TL")
+		}
+		if font, ok := s.fonts[args[0].Name()]; ok {
+			s.enc = font.Encoder()
+		} else {
+			s.enc = &nopEncoder{}
+		}
+	}
+}
+
+func (s *walkState) handleWalkShow(op string, args []Value) {
+	switch op {
+	case "\"":
+		if len(args) != 3 {
+			panic("bad \" operator")
+		}
+		fallthrough
+	case "'":
+		if len(args) != 1 {
+			panic("bad ' operator")
+		}
+		fallthrough
+	case "Tj":
+		if len(args) != 1 {
+			panic("bad Tj operator")
+		}
+		s.walker(s.enc, s.x, s.y, args[0].RawString())
+	case "TJ":
+		v := args[0]
+		for i := 0; i < v.Len(); i++ {
+			x := v.Index(i)
+			if x.Kind() == String {
+				s.walker(s.enc, s.x, s.y, x.RawString())
+			}
+		}
+	}
+}
+
+func (s *walkState) handleWalkPos(op string, args []Value) {
+	switch op {
+	case "Td":
+		if len(args) != 2 {
+			return
+		}
+		s.x += args[0].Float64()
+		s.y += args[1].Float64()
+	case "TD":
+		if len(args) != 2 {
+			return
+		}
+		ty := args[1].Float64()
+		s.x += args[0].Float64()
+		s.y += ty
+		s.tl = -ty
+	case "Tm":
+		s.x = args[4].Float64()
+		s.y = args[5].Float64()
+	}
+}
+
+func (s *walkState) interpretWalk(stk *Stack, op string) {
+	n := stk.Len()
+	args := make([]Value, n)
+	for i := n - 1; i >= 0; i-- {
+		args[i] = stk.Pop()
+	}
+	switch op {
+	case "BT", "T*", "TL", "Tf":
+		s.handleWalkFont(op, args)
+	case "\"", "'", "Tj", "TJ":
+		s.handleWalkShow(op, args)
+	case "Td", "TD", "Tm":
+		s.handleWalkPos(op, args)
+	}
+}
+
 func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s string)) {
-	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return
 	}
-
-	strm := p.V.Key("Contents")
-
 	fonts := make(map[string]*Font)
 	for _, font := range p.Fonts() {
 		f := p.Font(font)
 		fonts[font] = &f
 	}
-
-	var enc TextEncoding = &nopEncoder{}
-	var currentX, currentY, currentTL float64
-	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
-
-		// if DebugOn {
-		// 	fmt.Println(op, "->", args)
-		// }
-
-		switch op {
-		default:
-			return
-		case "BT": // begin text object: reset text position (leading persists)
-			currentX = 0
-			currentY = 0
-		case "T*": // move to start of next line: equivalent to 0 -TL Td
-			currentY -= currentTL
-		case "TL": // set text leading
-			if len(args) != 1 {
-				return
-			}
-			currentTL = args[0].Float64()
-		case "Tf": // set text font and size
-			if len(args) != 2 {
-				panic("bad TL")
-			}
-
-			if font, ok := fonts[args[0].Name()]; ok {
-				enc = font.Encoder()
-			} else {
-				enc = &nopEncoder{}
-			}
-		case "\"": // set spacing, move to next line, and show text
-			if len(args) != 3 {
-				panic("bad \" operator")
-			}
-			fallthrough
-		case "'": // move to next line and show text
-			if len(args) != 1 {
-				panic("bad ' operator")
-			}
-			fallthrough
-		case "Tj": // show text
-			if len(args) != 1 {
-				panic("bad Tj operator")
-			}
-
-			walker(enc, currentX, currentY, args[0].RawString())
-		case "TJ": // show text, allowing individual glyph positioning
-			v := args[0]
-			for i := 0; i < v.Len(); i++ {
-				x := v.Index(i)
-				if x.Kind() == String {
-					walker(enc, currentX, currentY, x.RawString())
-				}
-			}
-		case "Td": // move text position
-			if len(args) != 2 {
-				return
-			}
-			currentX += args[0].Float64()
-			currentY += args[1].Float64()
-		case "TD": // move text position and set leading
-			if len(args) != 2 {
-				return
-			}
-			ty := args[1].Float64()
-			currentX += args[0].Float64()
-			currentY += ty
-			currentTL = -ty
-		case "Tm":
-			currentX = args[4].Float64()
-			currentY = args[5].Float64()
-		}
-	})
+	s := &walkState{enc: &nopEncoder{}, fonts: fonts, walker: walker}
+	Interpret(p.V.Key("Contents"), s.interpretWalk)
 }
 
 // contentState holds the mutable interpreter state for the Content() operator loop.
