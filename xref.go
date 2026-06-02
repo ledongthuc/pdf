@@ -44,45 +44,54 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream missing Size")
 	}
 	table := make([]xref, size)
-
 	table, err := readXrefStreamData(r, strm, table, size)
 	if err != nil {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 	}
-
 	for prevoff := strm.hdr["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
-		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
-		obj1 := b.readObject()
-		obj, ok := obj1.(objdef)
-		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream not found: %v", objfmt(obj1))
+		nextTable, nextPrev, err := applyPrevXrefStream(r, off, table, size)
+		if err != nil {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 		}
-		prevstrm, ok := obj.obj.(stream)
-		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream not found: %v", objfmt(obj))
-		}
-		prevoff = prevstrm.hdr["Prev"]
-		prev := Value{r, objptr{}, prevstrm}
-		if prev.Kind() != Stream {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream is not stream: %v", prev)
-		}
-		if prev.Key("Type").Name() != "XRef" {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream does not have type XRef")
-		}
-		psize := prev.Key("Size").Int64()
-		if psize > size {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream larger than last stream")
-		}
-		if table, err = readXrefStreamData(r, prev.data.(stream), table, psize); err != nil {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: reading xref prev stream: %v", err)
-		}
+		table, prevoff = nextTable, nextPrev
 	}
-
 	return table, strmptr, strm.hdr, nil
+}
+
+// applyPrevXrefStream loads one "Prev" xref stream at absOffset, applies it to
+// table, and returns the updated table and the next Prev value (nil when the
+// chain ends).
+func applyPrevXrefStream(r *Reader, absOffset int64, table []xref, maxSize int64) ([]xref, interface{}, error) {
+	b := newBuffer(io.NewSectionReader(r.f, absOffset, r.end-absOffset), absOffset)
+	obj1 := b.readObject()
+	obj, ok := obj1.(objdef)
+	if !ok {
+		return nil, nil, fmt.Errorf("xref prev stream not found: %v", objfmt(obj1))
+	}
+	prevstrm, ok := obj.obj.(stream)
+	if !ok {
+		return nil, nil, fmt.Errorf("xref prev stream not found: %v", objfmt(obj))
+	}
+	prev := Value{r, objptr{}, prevstrm}
+	if prev.Kind() != Stream {
+		return nil, nil, fmt.Errorf("xref prev stream is not stream: %v", prev)
+	}
+	if prev.Key("Type").Name() != "XRef" {
+		return nil, nil, fmt.Errorf("xref prev stream does not have type XRef")
+	}
+	psize := prev.Key("Size").Int64()
+	if psize > maxSize {
+		return nil, nil, fmt.Errorf("xref prev stream larger than last stream")
+	}
+	var err error
+	if table, err = readXrefStreamData(r, prev.data.(stream), table, psize); err != nil {
+		return nil, nil, fmt.Errorf("reading xref prev stream: %v", err)
+	}
+	return table, prevstrm.hdr["Prev"], nil
 }
 
 // parseWArray validates and converts the PDF xref-stream W array to []int.
@@ -182,50 +191,76 @@ func decodeInt(b []byte) int {
 	return x
 }
 
+// applyPrevXrefTable loads one "Prev" xref table at absOffset, applies it to
+// table, and returns the updated table and the next Prev value (nil when the
+// chain ends).
+func applyPrevXrefTable(r *Reader, absOffset int64, table []xref) ([]xref, interface{}, error) {
+	b := newBuffer(io.NewSectionReader(r.f, absOffset, r.end-absOffset), absOffset)
+	if tok := b.readToken(); tok != keyword("xref") {
+		return nil, nil, fmt.Errorf("xref Prev does not point to xref")
+	}
+	var err error
+	if table, err = readXrefTableData(b, table); err != nil {
+		return nil, nil, err
+	}
+	trailer, ok := b.readObject().(dict)
+	if !ok {
+		return nil, nil, fmt.Errorf("xref Prev table not followed by trailer dictionary")
+	}
+	return table, trailer["Prev"], nil
+}
+
+// ensureXrefSlot ensures table[x] is accessible, growing the slice if needed.
+func ensureXrefSlot(table []xref, x int) []xref {
+	for cap(table) <= x {
+		table = append(table[:cap(table)], xref{})
+	}
+	if len(table) <= x {
+		table = table[:x+1]
+	}
+	return table
+}
+
+// readXrefTableEntry reads and validates one xref table entry (offset gen alloc).
+func readXrefTableEntry(b *buffer) (off, gen int64, alloc keyword, err error) {
+	var ok1, ok2, ok3 bool
+	off, ok1 = b.readToken().(int64)
+	gen, ok2 = b.readToken().(int64)
+	alloc, ok3 = b.readToken().(keyword)
+	if !ok1 || !ok2 || !ok3 || alloc != keyword("f") && alloc != keyword("n") {
+		return 0, 0, "", fmt.Errorf("malformed xref table")
+	}
+	return
+}
+
 func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	var table []xref
-
 	table, err := readXrefTableData(b, table)
 	if err != nil {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 	}
-
 	trailer, ok := b.readObject().(dict)
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref table not followed by trailer dictionary")
 	}
-
 	for prevoff := trailer["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
-		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
-		tok := b.readToken()
-		if tok != keyword("xref") {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev does not point to xref")
-		}
-		table, err = readXrefTableData(b, table)
+		nextTable, nextPrev, err := applyPrevXrefTable(r, off, table)
 		if err != nil {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 		}
-
-		trailer, ok := b.readObject().(dict)
-		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev table not followed by trailer dictionary")
-		}
-		prevoff = trailer["Prev"]
+		table, prevoff = nextTable, nextPrev
 	}
-
 	size, ok := trailer[name("Size")].(int64)
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: trailer missing /Size entry")
 	}
-
 	if size < int64(len(table)) {
 		table = table[:size]
 	}
-
 	return table, objptr{}, trailer, nil
 }
 
@@ -241,19 +276,12 @@ func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 			return nil, fmt.Errorf("malformed xref table")
 		}
 		for i := 0; i < int(n); i++ {
-			off, ok1 := b.readToken().(int64)
-			gen, ok2 := b.readToken().(int64)
-			alloc, ok3 := b.readToken().(keyword)
-			if !ok1 || !ok2 || !ok3 || alloc != keyword("f") && alloc != keyword("n") {
-				return nil, fmt.Errorf("malformed xref table")
+			off, gen, alloc, err := readXrefTableEntry(b)
+			if err != nil {
+				return nil, err
 			}
 			x := int(start) + i
-			for cap(table) <= x {
-				table = append(table[:cap(table)], xref{})
-			}
-			if len(table) <= x {
-				table = table[:x+1]
-			}
+			table = ensureXrefSlot(table, x)
 			if alloc == "n" && table[x].offset == 0 {
 				table[x] = xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)}
 			}
