@@ -39,6 +39,16 @@ func (s *plainTextState) handlePlainTf(args []Value) {
 	}
 }
 
+// showArray decodes and writes every String element of a TJ array operand.
+func (s *plainTextState) showArray(v Value) {
+	for i := 0; i < v.Len(); i++ {
+		x := v.Index(i)
+		if x.Kind() == String {
+			s.showEncoded(x.RawString())
+		}
+	}
+}
+
 func (s *plainTextState) handlePlainShow(op string, args []Value) {
 	switch op {
 	case "BT":
@@ -60,14 +70,28 @@ func (s *plainTextState) handlePlainShow(op string, args []Value) {
 		}
 		s.showEncoded(args[0].RawString())
 	case "TJ":
-		v := args[0]
-		for i := 0; i < v.Len(); i++ {
-			x := v.Index(i)
-			if x.Kind() == String {
-				s.showEncoded(x.RawString())
-			}
-		}
+		s.showArray(args[0])
 	}
+}
+
+// handlePlainDo recurses into a Form XObject named by args[0] and appends its text.
+func (s *plainTextState) handlePlainDo(args []Value) {
+	if s.depth >= xobjMaxDepth || len(args) == 0 {
+		return
+	}
+	xobj := s.resources.Key("XObject").Key(args[0].Name())
+	if xobj.Key("Subtype").Name() != "Form" {
+		return
+	}
+	xobjRes := xobj.Key("Resources")
+	sub := &plainTextState{enc: &nopEncoder{}, resources: xobjRes, depth: s.depth + 1}
+	sub.fonts = make(map[string]*Font)
+	for _, fn := range xobjRes.Key("Font").Keys() {
+		f := Font{xobjRes.Key("Font").Key(fn), nil}
+		sub.fonts[fn] = &f
+	}
+	Interpret(xobj, sub.interpretPlain)
+	s.buf.WriteString(sub.buf.String())
 }
 
 func (s *plainTextState) interpretPlain(stk *Stack, op string) {
@@ -82,22 +106,7 @@ func (s *plainTextState) interpretPlain(stk *Stack, op string) {
 	case "BT", "T*", "\"", "'", "Tj", "TJ":
 		s.handlePlainShow(op, args)
 	case "Do":
-		if s.depth >= xobjMaxDepth || len(args) == 0 {
-			break
-		}
-		xobj := s.resources.Key("XObject").Key(args[0].Name())
-		if xobj.Key("Subtype").Name() != "Form" {
-			break
-		}
-		xobjRes := xobj.Key("Resources")
-		sub := &plainTextState{enc: &nopEncoder{}, resources: xobjRes, depth: s.depth + 1}
-		sub.fonts = make(map[string]*Font)
-		for _, fn := range xobjRes.Key("Font").Keys() {
-			f := Font{xobjRes.Key("Font").Key(fn), nil}
-			sub.fonts[fn] = &f
-		}
-		Interpret(xobj, sub.interpretPlain)
-		s.buf.WriteString(sub.buf.String())
+		s.handlePlainDo(args)
 	}
 }
 
