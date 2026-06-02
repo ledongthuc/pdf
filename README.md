@@ -165,4 +165,5 @@ func main() {
 | [#48](https://github.com/ledongthuc/pdf/issues/48) | `\n` added by recent version breaks old systems | Removed `showText("\n")` from `case "BT":` — BT is matrix-init, not line-break | Directly fixed |
 | [#55](https://github.com/ledongthuc/pdf/issues/55) | GetPlainText do not support encoding "UniGB-UCS2-H" | `ucs2BEEncoder` wired for all 8 `Uni*-UCS2-H/V` CMap names | Directly fixed |
 | [#57](https://github.com/ledongthuc/pdf/issues/57) | Crash when image is in there (malformed PNG) | `case "ID":` skip in `ps.go` `Interpret()`; `readHexString` EOF guard in `lex.go` | Directly fixed |
+| [#31](https://github.com/ledongthuc/pdf/issues/31) | Expose page dimensions | `Page.MediaBox()` and `Page.CropBox()` added; both walk the page-tree inheritance chain; `CropBox` falls back to `MediaBox` when absent | Directly fixed |
 | [#60](https://github.com/ledongthuc/pdf/issues/60) | Parse PDF, some content appears garbled | Removed shared `fonts` map from `(*Reader).GetPlainText`; each page now passes `nil` so `(*Page).GetPlainText` builds a fresh per-page font map | Directly fixed |

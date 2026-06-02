@@ -122,15 +122,25 @@ func (p Page) findInherited(key string) Value {
 	return Value{}
 }
 
-/*
-func (p Page) MediaBox() Value {
-	return p.findInherited("MediaBox")
+func rectFromValue(v Value) [4]float64 {
+	return [4]float64{
+		v.Index(0).Float64(),
+		v.Index(1).Float64(),
+		v.Index(2).Float64(),
+		v.Index(3).Float64(),
+	}
 }
 
-func (p Page) CropBox() Value {
-	return p.findInherited("CropBox")
+func (p Page) MediaBox() [4]float64 {
+	return rectFromValue(p.findInherited("MediaBox"))
 }
-*/
+
+func (p Page) CropBox() [4]float64 {
+	if r := p.findInherited("CropBox"); r.Kind() != Null {
+		return rectFromValue(r)
+	}
+	return p.MediaBox()
+}
 
 // Resources returns the resources dictionary associated with the page.
 func (p Page) Resources() Value {

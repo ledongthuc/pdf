@@ -328,3 +328,73 @@ func TestContentBasicText(t *testing.T) {
 		t.Errorf("Text[0] pos: want (50,100), got (%v,%v)", c.Text[0].X, c.Text[0].Y)
 	}
 }
+
+func TestPageMediaBox(t *testing.T) {
+	data := buildTextPDF("BT /F1 12 Tf (Hello) Tj ET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got := r.Page(1).MediaBox()
+	want := [4]float64{0, 0, 612, 792}
+	if got != want {
+		t.Errorf("MediaBox: want %v, got %v", want, got)
+	}
+}
+
+func TestPageCropBoxFallback(t *testing.T) {
+	data := buildTextPDF("BT /F1 12 Tf (Hello) Tj ET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	p := r.Page(1)
+	got := p.CropBox()
+	want := p.MediaBox()
+	if got != want {
+		t.Errorf("CropBox fallback: want %v (MediaBox), got %v", want, got)
+	}
+}
+
+func buildCropBoxPDF() []byte {
+	var b strings.Builder
+	offsets := make([]int, 6)
+
+	b.WriteString("%PDF-1.4\n")
+
+	offsets[1] = b.Len()
+	b.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+
+	offsets[2] = b.Len()
+	b.WriteString("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+
+	offsets[3] = b.Len()
+	b.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [10 20 580 760] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n")
+
+	cs := "BT /F1 12 Tf (Hello) Tj ET"
+	offsets[4] = b.Len()
+	fmt.Fprintf(&b, "4 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(cs)+1, cs)
+
+	offsets[5] = b.Len()
+	b.WriteString("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+
+	xrefOff := b.Len()
+	fmt.Fprintf(&b, "xref\n0 6\n0000000000 65535 f \n")
+	for i := 1; i <= 5; i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xrefOff)
+	return []byte(b.String())
+}
+
+func TestPageCropBoxPresent(t *testing.T) {
+	r, err := OpenBytes(buildCropBoxPDF())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	got := r.Page(1).CropBox()
+	want := [4]float64{10, 20, 580, 760}
+	if got != want {
+		t.Errorf("CropBox: want %v, got %v", want, got)
+	}
+}
