@@ -48,18 +48,25 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if err != nil {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 	}
-	for prevoff := strm.hdr["Prev"]; prevoff != nil; {
+	if table, err = followXrefStreamPrevChain(r, table, size, strm.hdr); err != nil {
+		return nil, objptr{}, nil, err
+	}
+	return table, strmptr, strm.hdr, nil
+}
+
+func followXrefStreamPrevChain(r *Reader, table []xref, size int64, hdr dict) ([]xref, error) {
+	for prevoff := hdr["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
+			return nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
 		nextTable, nextPrev, err := applyPrevXrefStream(r, off, table, size)
 		if err != nil {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
+			return nil, fmt.Errorf("malformed PDF: %v", err)
 		}
 		table, prevoff = nextTable, nextPrev
 	}
-	return table, strmptr, strm.hdr, nil
+	return table, nil
 }
 
 // applyPrevXrefStream loads one "Prev" xref stream at absOffset, applies it to
@@ -122,9 +129,7 @@ func processXrefEntry(buf []byte, w []int, start int64, i int, table []xref, dat
 	v2 := decodeInt(buf[w[0] : w[0]+w[1]])
 	v3 := decodeInt(buf[w[0]+w[1] : w[0]+w[1]+w[2]])
 	x := int(start) + i
-	for cap(table) <= x {
-		table = append(table[:cap(table)], xref{})
-	}
+	table = ensureXrefSlot(table, x)
 	if table[x].ptr != (objptr{}) {
 		return table, nil
 	}
@@ -166,6 +171,10 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 	}
 	buf := make([]byte, wtotal)
 	data := v.Reader()
+	return processXrefIndexPairs(data, buf, w, index, table)
+}
+
+func processXrefIndexPairs(data io.ReadCloser, buf []byte, w []int, index array, table []xref) ([]xref, error) {
 	for len(index) > 0 {
 		start, ok1 := index[0].(int64)
 		n, ok2 := index[1].(int64)
@@ -174,6 +183,7 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 		}
 		index = index[2:]
 		for i := 0; i < int(n); i++ {
+			var err error
 			table, err = processXrefEntry(buf, w, start, i, table, data)
 			if err != nil {
 				return nil, err
@@ -189,6 +199,21 @@ func decodeInt(b []byte) int {
 		x = x<<8 | int(c)
 	}
 	return x
+}
+
+func followXrefTablePrevChain(r *Reader, table []xref, trailer dict) ([]xref, error) {
+	for prevoff := trailer["Prev"]; prevoff != nil; {
+		off, ok := prevoff.(int64)
+		if !ok {
+			return nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
+		}
+		nextTable, nextPrev, err := applyPrevXrefTable(r, off, table)
+		if err != nil {
+			return nil, fmt.Errorf("malformed PDF: %v", err)
+		}
+		table, prevoff = nextTable, nextPrev
+	}
+	return table, nil
 }
 
 // applyPrevXrefTable loads one "Prev" xref table at absOffset, applies it to
@@ -243,16 +268,8 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref table not followed by trailer dictionary")
 	}
-	for prevoff := trailer["Prev"]; prevoff != nil; {
-		off, ok := prevoff.(int64)
-		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
-		}
-		nextTable, nextPrev, err := applyPrevXrefTable(r, off, table)
-		if err != nil {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
-		}
-		table, prevoff = nextTable, nextPrev
+	if table, err = followXrefTablePrevChain(r, table, trailer); err != nil {
+		return nil, objptr{}, nil, err
 	}
 	size, ok := trailer[name("Size")].(int64)
 	if !ok {
@@ -262,6 +279,21 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		table = table[:size]
 	}
 	return table, objptr{}, trailer, nil
+}
+
+func applyXrefTableSection(b *buffer, start int64, n int64, table []xref) ([]xref, error) {
+	for i := 0; i < int(n); i++ {
+		off, gen, alloc, err := readXrefTableEntry(b)
+		if err != nil {
+			return nil, err
+		}
+		x := int(start) + i
+		table = ensureXrefSlot(table, x)
+		if alloc == "n" && table[x].offset == 0 {
+			table[x] = xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)}
+		}
+	}
+	return table, nil
 }
 
 func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
@@ -275,16 +307,10 @@ func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 		if !ok1 || !ok2 {
 			return nil, fmt.Errorf("malformed xref table")
 		}
-		for i := 0; i < int(n); i++ {
-			off, gen, alloc, err := readXrefTableEntry(b)
-			if err != nil {
-				return nil, err
-			}
-			x := int(start) + i
-			table = ensureXrefSlot(table, x)
-			if alloc == "n" && table[x].offset == 0 {
-				table[x] = xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)}
-			}
+		var err error
+		table, err = applyXrefTableSection(b, start, n, table)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return table, nil
@@ -351,12 +377,16 @@ func findStartxrefFallback(f io.ReaderAt, size int64) (int64, error) {
 	return -1, fmt.Errorf("%%EOF not found in file")
 }
 
+func isValidPDFTerminator(b byte) bool {
+	return b == '\r' || b == '\n' || b == ' ' || b == '\t'
+}
+
 // validatePDFHeader reads the first 10 bytes of f and returns an error when
 // the %PDF-n.m header is missing or malformed.
 func validatePDFHeader(f io.ReaderAt) error {
 	buf := make([]byte, 10)
 	f.ReadAt(buf, 0)
-	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' && buf[8] != ' ' && buf[8] != '\t' {
+	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || !isValidPDFTerminator(buf[8]) {
 		return fmt.Errorf("not a PDF file: invalid header")
 	}
 	return nil
