@@ -5,6 +5,8 @@
 
 A Go library for reading PDF files, with active CJK text extraction support.
 
+**Requires Go 1.25+** (`go.mod` directive).
+
 Forked from [ledongthuc/pdf](https://github.com/ledongthuc/pdf) (upstream inactive since 2024).
 Original lineage: [rsc/pdf](https://github.com/rsc/pdf).
 
@@ -154,6 +156,7 @@ func main() {
 | [#13](https://github.com/ledongthuc/pdf/issues/13) | Load Reader from bytes instead of file path | `OpenBytes(src []byte)` added in `read.go` | Directly fixed |
 | [#16](https://github.com/ledongthuc/pdf/issues/16) | GetTextByRow returns disordered text | `sort.Sort` → `sort.Stable` in `GetTextByRow`/`GetTextByColumn` | Directly fixed |
 | [#18](https://github.com/ledongthuc/pdf/issues/18) | GetTextByRow X/Y always 0 | `Td`/`TD`/`T*`/`TL` wired in `walkTextBlocks`; `BT` resets position; `currentTL` tracks leading | Directly fixed |
+| [#20](https://github.com/ledongthuc/pdf/issues/20) | `%%EOF` search window too small; valid PDFs rejected | Expanded search window from 100 → 1024 bytes (with clamp for small files); added `findStartxrefFallback` reverse-scan for `%%EOF` placed further than 1024 bytes before end | Directly fixed |
 | [#21](https://github.com/ledongthuc/pdf/issues/21) | unknown encoding UniGB-UCS2-H | Same fix as #55 — `ucs2BEEncoder` handles `UniGB-UCS2-H` | Directly fixed |
 | [#22](https://github.com/ledongthuc/pdf/issues/22) | Handle space after header | Relaxed byte-8 check in `NewReaderEncrypted` to accept space/tab | Directly fixed |
 | [#27](https://github.com/ledongthuc/pdf/issues/27) | GetTextByRow returns empty rows | `Td` in `walkTextBlocks` now updates `currentX`/`currentY` additively instead of emitting a spurious empty walker call; `TD` and `TL` wired; `T*` decrements Y by leading | Directly fixed |

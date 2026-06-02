@@ -280,6 +280,31 @@ func TestOpenBytesSpaceAfterHeader(t *testing.T) {
 	}
 }
 
+// TestOpenBytesEOFBeyond100 confirms that PDFs with %%EOF more than 100 bytes
+// before the end (e.g. libtiff-generated files with trailing newlines) are
+// accepted under the expanded 1024-byte search window.  Upstream issue #20.
+func TestOpenBytesEOFBeyond100(t *testing.T) {
+	data := buildTextPDF("BT /F1 12 Tf (hello) Tj ET")
+	// Append 400 newlines after %%EOF, pushing it 400 bytes before the end.
+	data = append(data, bytes.Repeat([]byte{'\n'}, 400)...)
+	if _, err := OpenBytes(data); err != nil {
+		t.Fatalf("OpenBytes rejected PDF with %%EOF >100 bytes before end: %v", err)
+	}
+}
+
+// TestOpenBytesEOFBeyond1024 confirms that PDFs with %%EOF more than 1024 bytes
+// before the end are handled by the fallback full-file reverse scan.
+// Upstream issue #20.
+func TestOpenBytesEOFBeyond1024(t *testing.T) {
+	data := buildTextPDF("BT /F1 12 Tf (hello) Tj ET")
+	// Append 1500 non-whitespace bytes after %%EOF so TrimRight cannot expose it,
+	// forcing the fallback reverse-scan path.
+	data = append(data, bytes.Repeat([]byte{'x'}, 1500)...)
+	if _, err := OpenBytes(data); err != nil {
+		t.Fatalf("OpenBytes rejected PDF with %%EOF >1024 bytes before end: %v", err)
+	}
+}
+
 func TestNewReaderMaliciousPDF(t *testing.T) {
 	var pdf bytes.Buffer
 	pdf.WriteString("%PDF-1.0\n")

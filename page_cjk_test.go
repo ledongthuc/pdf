@@ -218,7 +218,11 @@ func TestMultibyteCMapEncoder_GBEUC(t *testing.T) {
 	// Bytes sourced from Python: '中文'.encode('gb2312') = [0xd6,0xd0,0xce,0xc4]
 	// GB2312 is a strict subset of GBK — same byte layout for these chars
 	enc := &multibyteCMapEncoder{simplifiedchinese.GBK}
-	tests := []struct{ name string; raw []byte; want string }{
+	tests := []struct {
+		name string
+		raw  []byte
+		want string
+	}{
 		{
 			name: "GB-EUC: 中文 via GB2312 bytes",
 			raw:  []byte{0xd6, 0xd0, 0xce, 0xc4},
@@ -246,7 +250,11 @@ func TestMultibyteCMapEncoder_ETenmsB5(t *testing.T) {
 	// ETenms differs from ETen only in punctuation range 0xA1A1-0xA1FE;
 	// main character blocks are identical
 	enc := &multibyteCMapEncoder{traditionalchinese.Big5}
-	tests := []struct{ name string; raw []byte; want string }{
+	tests := []struct {
+		name string
+		raw  []byte
+		want string
+	}{
 		{
 			name: "ETenms-B5: 中文 via Big5 bytes",
 			raw:  []byte{0xa4, 0xa4, 0xa4, 0xe5},
@@ -268,7 +276,11 @@ func TestMultibyteCMapEncoder_KSCEUC(t *testing.T) {
 	// Bytes sourced from Python: '한국어'.encode('euc-kr') = [0xc7,0xd1,0xb1,0xb9,0xbe,0xee]
 	// KSC 5601 is EUC-KR predecessor; UHC-HW shares same byte encoding
 	enc := &multibyteCMapEncoder{korean.EUCKR}
-	tests := []struct{ name string; raw []byte; want string }{
+	tests := []struct {
+		name string
+		raw  []byte
+		want string
+	}{
 		{
 			name: "KSC-EUC: 한국어 via EUC-KR bytes",
 			raw:  []byte{0xc7, 0xd1, 0xb1, 0xb9, 0xbe, 0xee},

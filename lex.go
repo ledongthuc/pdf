@@ -499,7 +499,7 @@ func (b *buffer) readDict() object {
 			break
 		}
 		if tok == io.EOF {
-			tok = b.readToken()
+			b.readToken()
 			break
 		}
 		n, ok := tok.(name)

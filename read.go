@@ -4,7 +4,7 @@
 
 // Package pdf implements reading of PDF files.
 //
-// Overview
+// # Overview
 //
 // PDF is Adobe's Portable Document Format, ubiquitous on the internet.
 // A PDF document is a complex data format built on a fairly simple structure.
@@ -43,7 +43,6 @@
 // they are implemented only in terms of the Value API and could be moved outside
 // the package. Equally important, traversal of other PDF data structures can be implemented
 // in other packages as needed.
-//
 package pdf
 
 // BUG(rsc): The package is incomplete, although it has been used successfully on some
@@ -152,27 +151,36 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (r *Reader,
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
 	end := size
-	const endChunk = 100
-	buf = make([]byte, endChunk)
-	f.ReadAt(buf, end-endChunk)
+	const endChunk = 1024
+	readStart := end - endChunk
+	if readStart < 0 {
+		readStart = 0
+	}
+	buf = make([]byte, end-readStart)
+	f.ReadAt(buf, readStart)
 	for len(buf) > 0 && buf[len(buf)-1] == '\n' || buf[len(buf)-1] == '\r' {
 		buf = buf[:len(buf)-1]
 	}
 	buf = bytes.TrimRight(buf, "\r\n\t ")
-	if !bytes.HasSuffix(buf, []byte("%%EOF")) {
-		return nil, fmt.Errorf("not a PDF file: missing %%%%EOF")
+	var startxrefPos int64
+	if bytes.HasSuffix(buf, []byte("%%EOF")) {
+		i := findLastLine(buf, "startxref")
+		if i < 0 {
+			return nil, fmt.Errorf("malformed PDF file: missing final startxref")
+		}
+		startxrefPos = readStart + int64(i)
+	} else {
+		var ferr error
+		startxrefPos, ferr = findStartxrefFallback(f, end)
+		if ferr != nil {
+			return nil, fmt.Errorf("not a PDF file: missing %%%%EOF")
+		}
 	}
-	i := findLastLine(buf, "startxref")
-	if i < 0 {
-		return nil, fmt.Errorf("malformed PDF file: missing final startxref")
-	}
-
 	r = &Reader{
 		f:   f,
 		end: end,
 	}
-	pos := end - endChunk + int64(i)
-	b := newBuffer(io.NewSectionReader(f, pos, end-pos), pos)
+	b := newBuffer(io.NewSectionReader(f, startxrefPos, end-startxrefPos), startxrefPos)
 	if b.readToken() != keyword("startxref") {
 		return nil, fmt.Errorf("malformed PDF file: missing startxref")
 	}
@@ -467,6 +475,52 @@ func findLastLine(buf []byte, s string) int {
 	}
 }
 
+// findStartxrefFallback scans f backwards for %%EOF when it is not located
+// within the last endChunk bytes, then returns the absolute file offset of
+// the preceding "startxref" line.  Called only for non-conformant PDFs that
+// append data (e.g. a digital signature) after %%EOF.
+func findStartxrefFallback(f io.ReaderAt, size int64) (int64, error) {
+	const scanChunk = 4096
+	const overlap = 4 // len("%%EOF")-1: handles %%EOF straddling a chunk boundary
+
+	var suffix []byte
+	for pos := size; pos > 0; {
+		start := pos - scanChunk
+		if start < 0 {
+			start = 0
+		}
+		chunkLen := pos - start
+		combined := make([]byte, chunkLen+int64(len(suffix)))
+		f.ReadAt(combined[:chunkLen], start)
+		copy(combined[chunkLen:], suffix)
+
+		if idx := bytes.LastIndex(combined, []byte("%%EOF")); idx >= 0 {
+			eofAbs := start + int64(idx)
+			ctxStart := eofAbs - 512
+			if ctxStart < 0 {
+				ctxStart = 0
+			}
+			ctx := make([]byte, eofAbs-ctxStart)
+			f.ReadAt(ctx, ctxStart)
+			j := findLastLine(ctx, "startxref")
+			if j < 0 {
+				return -1, fmt.Errorf("%%EOF found but startxref missing")
+			}
+			return ctxStart + int64(j), nil
+		}
+
+		if chunkLen >= int64(overlap) {
+			suffix = make([]byte, overlap)
+			copy(suffix, combined[:overlap])
+		} else {
+			suffix = make([]byte, chunkLen)
+			copy(suffix, combined[:chunkLen])
+		}
+		pos = start
+	}
+	return -1, fmt.Errorf("%%EOF not found in file")
+}
+
 // A Value is a single PDF value, such as an integer, dictionary, or array.
 // The zero Value is a PDF null (Kind() == Null, IsNull() = true).
 type Value struct {
@@ -629,7 +683,7 @@ func (v Value) RawString() string {
 	return x
 }
 
-// Text returns v's string value interpreted as a ``text string'' (defined in the PDF spec)
+// Text returns v's string value interpreted as a “text string” (defined in the PDF spec)
 // and converted to UTF-8.
 // If v.Kind() != String, Text returns the empty string.
 func (v Value) Text() string {
@@ -818,7 +872,7 @@ func (e *errorReadCloser) Close() error {
 
 // Reader returns the data contained in the stream v.
 // If v.Kind() != Stream, Reader returns a ReadCloser that
-// responds to all reads with a ``stream not present'' error.
+// responds to all reads with a “stream not present” error.
 func (v Value) Reader() io.ReadCloser {
 	x, ok := v.data.(stream)
 	if !ok {
@@ -1051,7 +1105,7 @@ func okayV4(encrypt dict) bool {
 	if stmf != strf {
 		return false
 	}
-	cfparam, ok := cf[stmf].(dict)
+	cfparam, _ := cf[stmf].(dict)
 	if cfparam["AuthEvent"] != nil && cfparam["AuthEvent"] != name("DocOpen") {
 		return false
 	}

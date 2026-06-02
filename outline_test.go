@@ -13,12 +13,13 @@ import (
 // If title is empty, no /Outlines entry is included in the catalog.
 //
 // Object layout:
-//   1: /Catalog (Root) — references /Pages 2 0 R and optionally /Outlines N 0 R
-//   2: /Pages node — /Kids [3 0 R … (2+numPages) 0 R] /Count numPages
-//   3 … 2+numPages: individual /Page objects
-//   2+numPages+1: /Outlines root (if title != "")
-//   2+numPages+2: first outline item with /Dest (if destPageNum > 0)
-//   2+numPages+3: second outline item with /A /GoTo (if actionPageNum > 0)
+//
+//	1: /Catalog (Root) — references /Pages 2 0 R and optionally /Outlines N 0 R
+//	2: /Pages node — /Kids [3 0 R … (2+numPages) 0 R] /Count numPages
+//	3 … 2+numPages: individual /Page objects
+//	2+numPages+1: /Outlines root (if title != "")
+//	2+numPages+2: first outline item with /Dest (if destPageNum > 0)
+//	2+numPages+3: second outline item with /A /GoTo (if actionPageNum > 0)
 func buildOutlinePDF(numPages int, title string, destPageNum int, actionPageNum int) []byte {
 	// Build the Kids list for the Pages node (objects 3 … 2+numPages).
 	var kidRefs []string
