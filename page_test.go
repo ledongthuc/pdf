@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -264,7 +265,7 @@ func TestGetPlainTextCrossPageFontCache(t *testing.T) {
 		t.Fatalf("NumPage() = %d, want 2", got)
 	}
 
-	rc, err := r.GetPlainText()
+	rc, err := r.GetPlainText(context.Background())
 	if err != nil {
 		t.Fatalf("GetPlainText: %v", err)
 	}
@@ -485,7 +486,7 @@ func TestTextsMatchesGetStyledTexts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBytes: %v", err)
 	}
-	want, err := r.GetStyledTexts()
+	want, err := r.GetStyledTexts(context.Background())
 	if err != nil {
 		t.Fatalf("GetStyledTexts: %v", err)
 	}

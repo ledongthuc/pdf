@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/Detective-XH/pdf"
@@ -13,7 +14,7 @@ func main() {
 	}
 	defer f.Close()
 
-	sentences, err := r.GetStyledTexts()
+	sentences, err := r.GetStyledTexts(context.Background())
 	if err != nil {
 		panic(err)
 	}
