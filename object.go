@@ -102,6 +102,26 @@ func (b *buffer) tryReadObjRef(t1 int64) (object, bool) {
 	return nil, false
 }
 
+// maybeDecryptToken decrypts a string token when encryption is active for the
+// current object. Non-string tokens and unencrypted contexts are returned
+// unchanged.
+func (b *buffer) maybeDecryptToken(tok object) object {
+	if str, ok := tok.(string); ok && b.key != nil && b.objptr.id != 0 {
+		return decryptString(b.key, b.useAES, b.objptr, str)
+	}
+	return tok
+}
+
+// maybeReadObjRef tries to complete an indirect reference or definition when
+// tok is a valid object-id integer. Returns (result, true) on success.
+func (b *buffer) maybeReadObjRef(tok object) (object, bool) {
+	t1, ok := tok.(int64)
+	if !ok || int64(uint32(t1)) != t1 {
+		return nil, false
+	}
+	return b.tryReadObjRef(t1)
+}
+
 func (b *buffer) readObject() object {
 	b.depth++
 	defer func() { b.depth-- }()
@@ -115,18 +135,14 @@ func (b *buffer) readObject() object {
 		return b.readKeywordObject(kw)
 	}
 
-	if str, ok := tok.(string); ok && b.key != nil && b.objptr.id != 0 {
-		tok = decryptString(b.key, b.useAES, b.objptr, str)
-	}
+	tok = b.maybeDecryptToken(tok)
 
 	if !b.allowObjptr {
 		return tok
 	}
 
-	if t1, ok := tok.(int64); ok && int64(uint32(t1)) == t1 {
-		if result, matched := b.tryReadObjRef(t1); matched {
-			return result
-		}
+	if result, matched := b.maybeReadObjRef(tok); matched {
+		return result
 	}
 	return tok
 }
@@ -142,6 +158,39 @@ func (b *buffer) readArray() object {
 		x = append(x, b.readObject())
 	}
 	return x
+}
+
+// consumeStreamNewline consumes the mandatory line ending (CR, CRLF, or LF)
+// that the PDF spec requires immediately after the "stream" keyword.
+func (b *buffer) consumeStreamNewline() {
+	switch b.readByte() {
+	case '\r':
+		if b.readByte() != '\n' {
+			b.unreadByte()
+		}
+	case '\n':
+		// ok
+	default:
+		b.errorf("stream keyword not followed by newline")
+	}
+}
+
+// readDictStream checks whether the dict x is followed by a "stream" keyword
+// and, if so, returns a stream object. When allowStream is false or no stream
+// keyword appears the plain dict is returned unchanged.
+func (b *buffer) readDictStream(x dict) object {
+	if !b.allowStream {
+		return x
+	}
+
+	tok := b.readToken()
+	if tok != keyword("stream") {
+		b.unreadToken(tok)
+		return x
+	}
+
+	b.consumeStreamNewline()
+	return stream{x, b.objptr, b.readOffset()}
 }
 
 func (b *buffer) readDict() object {
@@ -164,26 +213,5 @@ func (b *buffer) readDict() object {
 		x[n] = b.readObject()
 	}
 
-	if !b.allowStream {
-		return x
-	}
-
-	tok := b.readToken()
-	if tok != keyword("stream") {
-		b.unreadToken(tok)
-		return x
-	}
-
-	switch b.readByte() {
-	case '\r':
-		if b.readByte() != '\n' {
-			b.unreadByte()
-		}
-	case '\n':
-		// ok
-	default:
-		b.errorf("stream keyword not followed by newline")
-	}
-
-	return stream{x, b.objptr, b.readOffset()}
+	return b.readDictStream(x)
 }
