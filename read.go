@@ -145,42 +145,15 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (r *Reader,
 		}
 	}()
 
-	buf := make([]byte, 10)
-	f.ReadAt(buf, 0)
-	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' && buf[8] != ' ' && buf[8] != '\t' {
-		return nil, fmt.Errorf("not a PDF file: invalid header")
+	if err = validatePDFHeader(f); err != nil {
+		return nil, err
 	}
-	end := size
-	const endChunk = 1024
-	readStart := end - endChunk
-	if readStart < 0 {
-		readStart = 0
+	startxrefPos, err := findStartxrefOffset(f, size)
+	if err != nil {
+		return nil, err
 	}
-	buf = make([]byte, end-readStart)
-	f.ReadAt(buf, readStart)
-	for len(buf) > 0 && buf[len(buf)-1] == '\n' || buf[len(buf)-1] == '\r' {
-		buf = buf[:len(buf)-1]
-	}
-	buf = bytes.TrimRight(buf, "\r\n\t ")
-	var startxrefPos int64
-	if bytes.HasSuffix(buf, []byte("%%EOF")) {
-		i := findLastLine(buf, "startxref")
-		if i < 0 {
-			return nil, fmt.Errorf("malformed PDF file: missing final startxref")
-		}
-		startxrefPos = readStart + int64(i)
-	} else {
-		var ferr error
-		startxrefPos, ferr = findStartxrefFallback(f, end)
-		if ferr != nil {
-			return nil, fmt.Errorf("not a PDF file: missing %%%%EOF")
-		}
-	}
-	r = &Reader{
-		f:   f,
-		end: end,
-	}
-	b := newBuffer(io.NewSectionReader(f, startxrefPos, end-startxrefPos), startxrefPos)
+	r = &Reader{f: f, end: size}
+	b := newBuffer(io.NewSectionReader(f, startxrefPos, size-startxrefPos), startxrefPos)
 	if b.readToken() != keyword("startxref") {
 		return nil, fmt.Errorf("malformed PDF file: missing startxref")
 	}
@@ -189,36 +162,14 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (r *Reader,
 		return nil, fmt.Errorf("malformed PDF file: startxref not followed by integer")
 	}
 	b = newBuffer(io.NewSectionReader(r.f, startxref, r.end-startxref), startxref)
-	var xrefs []xref
-	var trailerptr objptr
-	var trailer dict
-	xrefs, trailerptr, trailer, err = readXref(r, b)
+	r.xref, r.trailerptr, r.trailer, err = readXref(r, b)
 	if err != nil {
 		return nil, err
 	}
-	r.xref = xrefs
-	r.trailer = trailer
-	r.trailerptr = trailerptr
-	if trailer["Encrypt"] == nil {
-		return r, nil
-	}
-	err = r.initEncrypt("")
-	if err == nil {
-		return r, nil
-	}
-	if pw == nil || err != ErrInvalidPassword {
+	if err = tryDecrypt(r, pw); err != nil {
 		return nil, err
 	}
-	for {
-		next := pw()
-		if next == "" {
-			break
-		}
-		if r.initEncrypt(next) == nil {
-			return r, nil
-		}
-	}
-	return nil, err
+	return r, nil
 }
 
 // Trailer returns the file's Trailer value.
@@ -519,6 +470,69 @@ func findStartxrefFallback(f io.ReaderAt, size int64) (int64, error) {
 		pos = start
 	}
 	return -1, fmt.Errorf("%%EOF not found in file")
+}
+
+// validatePDFHeader reads the first 10 bytes of f and returns an error when
+// the %PDF-n.m header is missing or malformed.
+func validatePDFHeader(f io.ReaderAt) error {
+	buf := make([]byte, 10)
+	f.ReadAt(buf, 0)
+	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' && buf[8] != ' ' && buf[8] != '\t' {
+		return fmt.Errorf("not a PDF file: invalid header")
+	}
+	return nil
+}
+
+// findStartxrefOffset locates the "startxref" keyword near the end of f and
+// returns its absolute byte offset.  It searches the last 1024 bytes first;
+// when %%EOF is not found there, it falls back to a full reverse scan.
+func findStartxrefOffset(f io.ReaderAt, size int64) (int64, error) {
+	const endChunk = 1024
+	readStart := size - endChunk
+	if readStart < 0 {
+		readStart = 0
+	}
+	buf := make([]byte, size-readStart)
+	f.ReadAt(buf, readStart)
+	buf = bytes.TrimRight(buf, "\r\n\t ")
+	if bytes.HasSuffix(buf, []byte("%%EOF")) {
+		i := findLastLine(buf, "startxref")
+		if i < 0 {
+			return -1, fmt.Errorf("malformed PDF file: missing final startxref")
+		}
+		return readStart + int64(i), nil
+	}
+	pos, err := findStartxrefFallback(f, size)
+	if err != nil {
+		return -1, fmt.Errorf("not a PDF file: missing %%%%EOF")
+	}
+	return pos, nil
+}
+
+// tryDecrypt handles the optional encryption step.  It tries the empty
+// password first, then each password returned by pw in turn.  It returns nil
+// when the file is unencrypted or decryption succeeds.
+func tryDecrypt(r *Reader, pw func() string) error {
+	if r.trailer["Encrypt"] == nil {
+		return nil
+	}
+	err := r.initEncrypt("")
+	if err == nil {
+		return nil
+	}
+	if pw == nil || err != ErrInvalidPassword {
+		return err
+	}
+	for {
+		next := pw()
+		if next == "" {
+			break
+		}
+		if r.initEncrypt(next) == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // A Value is a single PDF value, such as an integer, dictionary, or array.

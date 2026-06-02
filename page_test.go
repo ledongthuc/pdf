@@ -282,3 +282,49 @@ func TestGetPlainTextCrossPageFontCache(t *testing.T) {
 		t.Errorf("page 2: expected '€' (WinAnsi 0x80) in output, got %q", got)
 	}
 }
+
+// TestContentBasicText is a snapshot guard for the Content() refactor.
+// It verifies that text, position, and rect data are correctly produced by
+// the operator dispatch path so any transcription error in the refactored
+// handlers is caught immediately.
+func TestContentBasicText(t *testing.T) {
+	// Build a PDF with Td-positioned text, a rectangle (re), and a TJ kern.
+	data := buildTextPDF("q\n10 20 100 50 re\nQ\nBT\n/F1 12 Tf\n50 100 Td\n(Hi) Tj\nET")
+	r, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	p := r.Page(1)
+	c := p.Content()
+
+	// Rect from "re"
+	if len(c.Rect) != 1 {
+		t.Fatalf("Rect: want 1, got %d", len(c.Rect))
+	}
+	if c.Rect[0].Min.X != 10 || c.Rect[0].Min.Y != 20 {
+		t.Errorf("Rect.Min: want (10,20), got (%v,%v)", c.Rect[0].Min.X, c.Rect[0].Min.Y)
+	}
+	if c.Rect[0].Max.X != 110 || c.Rect[0].Max.Y != 70 {
+		t.Errorf("Rect.Max: want (110,70), got (%v,%v)", c.Rect[0].Max.X, c.Rect[0].Max.Y)
+	}
+
+	// Text from "Tf + Td + Tj": 2 chars H, i
+	if len(c.Text) != 2 {
+		t.Fatalf("Text: want 2 chars, got %d", len(c.Text))
+	}
+	for i, ch := range []string{"H", "i"} {
+		if c.Text[i].S != ch {
+			t.Errorf("Text[%d].S: want %q, got %q", i, ch, c.Text[i].S)
+		}
+		if c.Text[i].Font != "Helvetica" {
+			t.Errorf("Text[%d].Font: want Helvetica, got %q", i, c.Text[i].Font)
+		}
+		if c.Text[i].FontSize != 12 {
+			t.Errorf("Text[%d].FontSize: want 12, got %v", i, c.Text[i].FontSize)
+		}
+	}
+	// First char must be at the Td position
+	if c.Text[0].X != 50 || c.Text[0].Y != 100 {
+		t.Errorf("Text[0] pos: want (50,100), got (%v,%v)", c.Text[0].X, c.Text[0].Y)
+	}
+}

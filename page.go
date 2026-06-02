@@ -905,230 +905,235 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 	})
 }
 
+// contentState holds the mutable interpreter state for the Content() operator loop.
+type contentState struct {
+	g      gstate
+	enc    TextEncoding
+	text   []Text
+	rect   []Rect
+	gstack []gstate
+	p      Page
+}
+
+// appendText decodes str through the current encoder and appends one Text
+// entry per glyph to s.text, advancing the text matrix after each glyph.
+func (s *contentState) appendText(str string) {
+	n := 0
+	decoded := s.enc.Decode(str)
+	for _, ch := range decoded {
+		var w0 float64
+		if n < len(str) {
+			w0 = s.g.Tf.Width(int(str[n]))
+		}
+		n++
+		f := s.g.Tf.BaseFont()
+		if i := strings.Index(f, "+"); i >= 0 {
+			f = f[i+1:]
+		}
+		Trm := matrix{{s.g.Tfs * s.g.Th, 0, 0}, {0, s.g.Tfs, 0}, {0, s.g.Trise, 1}}.mul(s.g.Tm).mul(s.g.CTM)
+		s.text = append(s.text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
+		tx := w0/1000*s.g.Tfs + s.g.Tc
+		tx *= s.g.Th
+		s.g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(s.g.Tm)
+	}
+}
+
+// handleGraphics handles path-construction and graphics-state operators.
+func (s *contentState) handleGraphics(op string, args []Value) {
+	switch op {
+	case "cm":
+		if len(args) != 6 {
+			panic("bad g.Tm")
+		}
+		var m matrix
+		for i := 0; i < 6; i++ {
+			m[i/2][i%2] = args[i].Float64()
+		}
+		m[2][2] = 1
+		s.g.CTM = m.mul(s.g.CTM)
+	case "re":
+		if len(args) != 4 {
+			panic("bad re")
+		}
+		x, y, w, h := args[0].Float64(), args[1].Float64(), args[2].Float64(), args[3].Float64()
+		s.rect = append(s.rect, Rect{Point{x, y}, Point{x + w, y + h}})
+	case "q":
+		s.gstack = append(s.gstack, s.g)
+	case "Q":
+		n := len(s.gstack) - 1
+		s.g = s.gstack[n]
+		s.gstack = s.gstack[:n]
+		// f, g, l, m, cs, scn, gs: no-op
+	}
+}
+
+// handleTextMatrix handles BT, ET, T*, TD, Td, and Tm operators.
+func (s *contentState) handleTextMatrix(op string, args []Value) {
+	switch op {
+	case "BT":
+		s.g.Tm = ident
+		s.g.Tlm = s.g.Tm
+	case "ET":
+		// no-op
+	case "T*":
+		x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -s.g.Tl, 1}}
+		s.g.Tlm = x.mul(s.g.Tlm)
+		s.g.Tm = s.g.Tlm
+	case "TD":
+		if len(args) != 2 {
+			panic("bad Td")
+		}
+		s.g.Tl = -args[1].Float64()
+		fallthrough
+	case "Td":
+		if len(args) != 2 {
+			panic("bad Td")
+		}
+		tx := args[0].Float64()
+		ty := args[1].Float64()
+		x := matrix{{1, 0, 0}, {0, 1, 0}, {tx, ty, 1}}
+		s.g.Tlm = x.mul(s.g.Tlm)
+		s.g.Tm = s.g.Tlm
+	case "Tm":
+		if len(args) != 6 {
+			panic("bad g.Tm")
+		}
+		var m matrix
+		for i := 0; i < 6; i++ {
+			m[i/2][i%2] = args[i].Float64()
+		}
+		m[2][2] = 1
+		s.g.Tm = m
+		s.g.Tlm = m
+	}
+}
+
+// handleTf handles the Tf (set text font and size) operator.
+func (s *contentState) handleTf(args []Value) {
+	if len(args) != 2 {
+		panic("bad TL")
+	}
+	f := args[0].Name()
+	s.g.Tf = s.p.Font(f)
+	s.enc = s.g.Tf.Encoder()
+	if s.enc == nil {
+		if DebugOn {
+			println("no cmap for", f)
+		}
+		s.enc = &nopEncoder{}
+	}
+	s.g.Tfs = args[1].Float64()
+}
+
+// handleTextParams handles scalar text-state operators: Tc, TL, Tr, Ts, Tw, Tz.
+func (s *contentState) handleTextParams(op string, args []Value) {
+	switch op {
+	case "Tc":
+		if len(args) != 1 {
+			panic("bad g.Tc")
+		}
+		s.g.Tc = args[0].Float64()
+	case "TL":
+		if len(args) != 1 {
+			panic("bad TL")
+		}
+		s.g.Tl = args[0].Float64()
+	case "Tr":
+		if len(args) != 1 {
+			panic("bad Tr")
+		}
+		s.g.Tmode = int(args[0].Int64())
+	case "Ts":
+		if len(args) != 1 {
+			panic("bad Ts")
+		}
+		s.g.Trise = args[0].Float64()
+	case "Tw":
+		if len(args) != 1 {
+			panic("bad g.Tw")
+		}
+		s.g.Tw = args[0].Float64()
+	case "Tz":
+		if len(args) != 1 {
+			panic("bad Tz")
+		}
+		s.g.Th = args[0].Float64() / 100
+	}
+}
+
+// handleTextShow handles text-show operators: Tj, TJ, ', and ".
+func (s *contentState) handleTextShow(op string, args []Value) {
+	switch op {
+	case "\"":
+		if len(args) != 3 {
+			panic("bad \" operator")
+		}
+		s.g.Tw = args[0].Float64()
+		s.g.Tc = args[1].Float64()
+		args = args[2:]
+		fallthrough
+	case "'":
+		if len(args) != 1 {
+			panic("bad ' operator")
+		}
+		x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -s.g.Tl, 1}}
+		s.g.Tlm = x.mul(s.g.Tlm)
+		s.g.Tm = s.g.Tlm
+		fallthrough
+	case "Tj":
+		if len(args) != 1 {
+			panic("bad Tj operator")
+		}
+		s.appendText(args[0].RawString())
+	case "TJ":
+		v := args[0]
+		for i := 0; i < v.Len(); i++ {
+			x := v.Index(i)
+			if x.Kind() == String {
+				s.appendText(x.RawString())
+			} else {
+				tx := -x.Float64() / 1000 * s.g.Tfs * s.g.Th
+				s.g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(s.g.Tm)
+			}
+		}
+		s.appendText("\n")
+	}
+}
+
+// interpret is the per-operator callback passed to Interpret.  It collects
+// stack arguments then dispatches to the appropriate handler.
+func (s *contentState) interpret(stk *Stack, op string) {
+	n := stk.Len()
+	args := make([]Value, n)
+	for i := n - 1; i >= 0; i-- {
+		args[i] = stk.Pop()
+	}
+	switch op {
+	case "cm", "re", "q", "Q", "f", "g", "l", "m", "cs", "scn", "gs":
+		s.handleGraphics(op, args)
+	case "BT", "ET", "T*", "TD", "Td", "Tm":
+		s.handleTextMatrix(op, args)
+	case "Tf":
+		s.handleTf(args)
+	case "Tc", "TL", "Tr", "Ts", "Tw", "Tz":
+		s.handleTextParams(op, args)
+	case "Tj", "TJ", "'", "\"":
+		s.handleTextShow(op, args)
+	}
+}
+
 // Content returns the page's content.
 func (p Page) Content() Content {
-	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return Content{}
 	}
-	strm := p.V.Key("Contents")
-	var enc TextEncoding = &nopEncoder{}
-
-	var g = gstate{
-		Th:  1,
-		CTM: ident,
+	s := &contentState{
+		g:   gstate{Th: 1, CTM: ident},
+		enc: &nopEncoder{},
+		p:   p,
 	}
-
-	var text []Text
-	showText := func(s string) {
-		n := 0
-		decoded := enc.Decode(s)
-		for _, ch := range decoded {
-			var w0 float64
-			if n < len(s) {
-				w0 = g.Tf.Width(int(s[n]))
-			}
-			n++
-
-			f := g.Tf.BaseFont()
-			if i := strings.Index(f, "+"); i >= 0 {
-				f = f[i+1:]
-			}
-
-			Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
-			text = append(text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch)})
-
-			tx := w0/1000*g.Tfs + g.Tc
-			tx *= g.Th
-			g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
-		}
-	}
-
-	var rect []Rect
-	var gstack []gstate
-	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
-		switch op {
-		default:
-			// if DebugOn {
-			// 	fmt.Println(op, args)
-			// }
-			return
-
-		case "cm": // update g.CTM
-			if len(args) != 6 {
-				panic("bad g.Tm")
-			}
-			var m matrix
-			for i := 0; i < 6; i++ {
-				m[i/2][i%2] = args[i].Float64()
-			}
-			m[2][2] = 1
-			g.CTM = m.mul(g.CTM)
-
-		case "gs": // set parameters from graphics state resource
-			//gs := p.Resources().Key("ExtGState").Key(args[0].Name())
-			//font := gs.Key("Font")
-			//if font.Kind() == Array && font.Len() == 2 {
-			// if DebugOn {
-			// 	fmt.Println("FONT", font)
-			// }
-			//}
-
-		case "f": // fill
-		case "g": // setgray
-		case "l": // lineto
-		case "m": // moveto
-
-		case "cs": // set colorspace non-stroking
-		case "scn": // set color non-stroking
-
-		case "re": // append rectangle to path
-			if len(args) != 4 {
-				panic("bad re")
-			}
-			x, y, w, h := args[0].Float64(), args[1].Float64(), args[2].Float64(), args[3].Float64()
-			rect = append(rect, Rect{Point{x, y}, Point{x + w, y + h}})
-
-		case "q": // save graphics state
-			gstack = append(gstack, g)
-
-		case "Q": // restore graphics state
-			n := len(gstack) - 1
-			g = gstack[n]
-			gstack = gstack[:n]
-
-		case "BT": // begin text (reset text matrix and line matrix)
-			g.Tm = ident
-			g.Tlm = g.Tm
-
-		case "ET": // end text
-
-		case "T*": // move to start of next line
-			x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -g.Tl, 1}}
-			g.Tlm = x.mul(g.Tlm)
-			g.Tm = g.Tlm
-
-		case "Tc": // set character spacing
-			if len(args) != 1 {
-				panic("bad g.Tc")
-			}
-			g.Tc = args[0].Float64()
-
-		case "TD": // move text position and set leading
-			if len(args) != 2 {
-				panic("bad Td")
-			}
-			g.Tl = -args[1].Float64()
-			fallthrough
-		case "Td": // move text position
-			if len(args) != 2 {
-				panic("bad Td")
-			}
-			tx := args[0].Float64()
-			ty := args[1].Float64()
-			x := matrix{{1, 0, 0}, {0, 1, 0}, {tx, ty, 1}}
-			g.Tlm = x.mul(g.Tlm)
-			g.Tm = g.Tlm
-
-		case "Tf": // set text font and size
-			if len(args) != 2 {
-				panic("bad TL")
-			}
-			f := args[0].Name()
-			g.Tf = p.Font(f)
-			enc = g.Tf.Encoder()
-			if enc == nil {
-				if DebugOn {
-					println("no cmap for", f)
-				}
-				enc = &nopEncoder{}
-			}
-			g.Tfs = args[1].Float64()
-
-		case "\"": // set spacing, move to next line, and show text
-			if len(args) != 3 {
-				panic("bad \" operator")
-			}
-			g.Tw = args[0].Float64()
-			g.Tc = args[1].Float64()
-			args = args[2:]
-			fallthrough
-		case "'": // move to next line and show text
-			if len(args) != 1 {
-				panic("bad ' operator")
-			}
-			x := matrix{{1, 0, 0}, {0, 1, 0}, {0, -g.Tl, 1}}
-			g.Tlm = x.mul(g.Tlm)
-			g.Tm = g.Tlm
-			fallthrough
-		case "Tj": // show text
-			if len(args) != 1 {
-				panic("bad Tj operator")
-			}
-			showText(args[0].RawString())
-
-		case "TJ": // show text, allowing individual glyph positioning
-			v := args[0]
-			for i := 0; i < v.Len(); i++ {
-				x := v.Index(i)
-				if x.Kind() == String {
-					showText(x.RawString())
-				} else {
-					tx := -x.Float64() / 1000 * g.Tfs * g.Th
-					g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
-				}
-			}
-			showText("\n")
-
-		case "TL": // set text leading
-			if len(args) != 1 {
-				panic("bad TL")
-			}
-			g.Tl = args[0].Float64()
-
-		case "Tm": // set text matrix and line matrix
-			if len(args) != 6 {
-				panic("bad g.Tm")
-			}
-			var m matrix
-			for i := 0; i < 6; i++ {
-				m[i/2][i%2] = args[i].Float64()
-			}
-			m[2][2] = 1
-			g.Tm = m
-			g.Tlm = m
-
-		case "Tr": // set text rendering mode
-			if len(args) != 1 {
-				panic("bad Tr")
-			}
-			g.Tmode = int(args[0].Int64())
-
-		case "Ts": // set text rise
-			if len(args) != 1 {
-				panic("bad Ts")
-			}
-			g.Trise = args[0].Float64()
-
-		case "Tw": // set word spacing
-			if len(args) != 1 {
-				panic("bad g.Tw")
-			}
-			g.Tw = args[0].Float64()
-
-		case "Tz": // set horizontal text scaling
-			if len(args) != 1 {
-				panic("bad Tz")
-			}
-			g.Th = args[0].Float64() / 100
-		}
-	})
-	return Content{text, rect}
+	Interpret(p.V.Key("Contents"), s.interpret)
+	return Content{s.text, s.rect}
 }
 
 // TextVertical implements sort.Interface for sorting
