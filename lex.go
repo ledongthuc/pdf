@@ -266,20 +266,26 @@ func (b *buffer) appendEscape(tmp []byte, c byte) []byte {
 	case '\n':
 		return tmp // line continuation — no character appended
 	case '0', '1', '2', '3', '4', '5', '6', '7':
-		x := int(c - '0')
-		for i := 0; i < 2; i++ {
-			c = b.readByte()
-			if c < '0' || c > '7' {
-				b.unreadByte()
-				break
-			}
-			x = x*8 + int(c-'0')
-		}
-		if x > 255 {
-			b.errorf("invalid octal escape \\%03o", x)
-		}
-		return append(tmp, byte(x))
+		return b.appendOctalEscape(tmp, c)
 	}
+}
+
+// appendOctalEscape decodes a PDF octal escape \ddd (1–3 octal digits).
+// first is the digit already consumed; up to two more are read from b.
+func (b *buffer) appendOctalEscape(tmp []byte, first byte) []byte {
+	x := int(first - '0')
+	for i := 0; i < 2; i++ {
+		c := b.readByte()
+		if c < '0' || c > '7' {
+			b.unreadByte()
+			break
+		}
+		x = x*8 + int(c-'0')
+	}
+	if x > 255 {
+		b.errorf("invalid octal escape \\%03o", x)
+	}
+	return append(tmp, byte(x))
 }
 
 func (b *buffer) readLiteralString() token {
