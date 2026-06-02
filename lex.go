@@ -294,7 +294,7 @@ func (b *buffer) skipLineContinuation(tmp []byte, c byte) []byte {
 // first is the digit already consumed; up to two more are read from b.
 func (b *buffer) appendOctalEscape(tmp []byte, first byte) []byte {
 	x := int(first - '0')
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		c := b.readByte()
 		if c < '0' || c > '7' {
 			b.unreadByte()

@@ -43,7 +43,7 @@ func openInterpBuffer(strm Value) *buffer {
 	if strm.Kind() == Array {
 		n := strm.Len()
 		readers := make([]io.Reader, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			readers[i] = strm.Index(i).Reader()
 		}
 		b = newBuffer(io.MultiReader(readers...), 0)
