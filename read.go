@@ -249,6 +249,55 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	return table, strmptr, strm.hdr, nil
 }
 
+// parseWArray validates and converts the PDF xref-stream W array to []int.
+func parseWArray(ww array) ([]int, error) {
+	var w []int
+	for _, x := range ww {
+		i, ok := x.(int64)
+		if !ok || int64(int(i)) != i {
+			return nil, fmt.Errorf("invalid W array %v", objfmt(ww))
+		}
+		w = append(w, int(i))
+	}
+	if len(w) < 3 {
+		return nil, fmt.Errorf("invalid W array %v", objfmt(ww))
+	}
+	return w, nil
+}
+
+// processXrefEntry reads one entry from an xref stream and updates table.
+func processXrefEntry(buf []byte, w []int, start int64, i int, table []xref, data io.ReadCloser) ([]xref, error) {
+	if _, err := io.ReadFull(data, buf); err != nil {
+		return nil, fmt.Errorf("error reading xref stream: %v", err)
+	}
+	v1 := decodeInt(buf[0:w[0]])
+	if w[0] == 0 {
+		v1 = 1
+	}
+	v2 := decodeInt(buf[w[0] : w[0]+w[1]])
+	v3 := decodeInt(buf[w[0]+w[1] : w[0]+w[1]+w[2]])
+	x := int(start) + i
+	for cap(table) <= x {
+		table = append(table[:cap(table)], xref{})
+	}
+	if table[x].ptr != (objptr{}) {
+		return table, nil
+	}
+	switch v1 {
+	case 0:
+		table[x] = xref{ptr: objptr{0, 65535}}
+	case 1:
+		table[x] = xref{ptr: objptr{uint32(x), uint16(v3)}, offset: int64(v2)}
+	case 2:
+		table[x] = xref{ptr: objptr{uint32(x), 0}, inStream: true, stream: objptr{uint32(v2), 0}, offset: int64(v3)}
+	default:
+		if DebugOn {
+			fmt.Printf("invalid xref stream type %d: %x\n", v1, buf)
+		}
+	}
+	return table, nil
+}
+
 func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xref, error) {
 	index, _ := strm.hdr["Index"].(array)
 	if index == nil {
@@ -261,19 +310,10 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 	if !ok {
 		return nil, fmt.Errorf("xref stream missing W array")
 	}
-
-	var w []int
-	for _, x := range ww {
-		i, ok := x.(int64)
-		if !ok || int64(int(i)) != i {
-			return nil, fmt.Errorf("invalid W array %v", objfmt(ww))
-		}
-		w = append(w, int(i))
+	w, err := parseWArray(ww)
+	if err != nil {
+		return nil, err
 	}
-	if len(w) < 3 {
-		return nil, fmt.Errorf("invalid W array %v", objfmt(ww))
-	}
-
 	v := Value{r, objptr{}, strm}
 	wtotal := 0
 	for _, wid := range w {
@@ -289,34 +329,9 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 		}
 		index = index[2:]
 		for i := 0; i < int(n); i++ {
-			_, err := io.ReadFull(data, buf)
+			table, err = processXrefEntry(buf, w, start, i, table, data)
 			if err != nil {
-				return nil, fmt.Errorf("error reading xref stream: %v", err)
-			}
-			v1 := decodeInt(buf[0:w[0]])
-			if w[0] == 0 {
-				v1 = 1
-			}
-			v2 := decodeInt(buf[w[0] : w[0]+w[1]])
-			v3 := decodeInt(buf[w[0]+w[1] : w[0]+w[1]+w[2]])
-			x := int(start) + i
-			for cap(table) <= x {
-				table = append(table[:cap(table)], xref{})
-			}
-			if table[x].ptr != (objptr{}) {
-				continue
-			}
-			switch v1 {
-			case 0:
-				table[x] = xref{ptr: objptr{0, 65535}}
-			case 1:
-				table[x] = xref{ptr: objptr{uint32(x), uint16(v3)}, offset: int64(v2)}
-			case 2:
-				table[x] = xref{ptr: objptr{uint32(x), 0}, inStream: true, stream: objptr{uint32(v2), 0}, offset: int64(v3)}
-			default:
-				if DebugOn {
-					fmt.Printf("invalid xref stream type %d: %x\n", v1, buf)
-				}
+				return nil, err
 			}
 		}
 	}
@@ -802,57 +817,61 @@ func (v Value) Len() int {
 	return len(x)
 }
 
+// resolveInStream locates ptr inside an ObjStm (object stream) by scanning
+// the index entries, following Extends chains as needed.
+func (r *Reader) resolveInStream(parent objptr, ptr objptr, xr xref) interface{} {
+	strm := r.resolve(parent, xr.stream)
+Search:
+	for {
+		if strm.Kind() != Stream {
+			panic("not a stream")
+		}
+		if strm.Key("Type").Name() != "ObjStm" {
+			panic("not an object stream")
+		}
+		n := int(strm.Key("N").Int64())
+		first := strm.Key("First").Int64()
+		if first == 0 {
+			panic("missing First")
+		}
+		b := newBuffer(strm.Reader(), 0)
+		b.allowEOF = true
+		for i := 0; i < n; i++ {
+			id, _ := b.readToken().(int64)
+			off, _ := b.readToken().(int64)
+			if uint32(id) == ptr.id {
+				b.seekForward(first + off)
+				return b.readObject()
+			}
+		}
+		ext := strm.Key("Extends")
+		if ext.Kind() != Stream {
+			panic("cannot find object in stream")
+		}
+		strm = ext
+		continue Search
+	}
+}
+
 func (r *Reader) resolve(parent objptr, x interface{}) Value {
 	if ptr, ok := x.(objptr); ok {
 		if ptr.id >= uint32(len(r.xref)) {
 			return Value{}
 		}
-		xref := r.xref[ptr.id]
-		if xref.ptr != ptr || !xref.inStream && xref.offset == 0 {
+		xr := r.xref[ptr.id]
+		if xr.ptr != ptr || !xr.inStream && xr.offset == 0 {
 			return Value{}
 		}
-		var obj object
-		if xref.inStream {
-			strm := r.resolve(parent, xref.stream)
-		Search:
-			for {
-				if strm.Kind() != Stream {
-					panic("not a stream")
-				}
-				if strm.Key("Type").Name() != "ObjStm" {
-					panic("not an object stream")
-				}
-				n := int(strm.Key("N").Int64())
-				first := strm.Key("First").Int64()
-				if first == 0 {
-					panic("missing First")
-				}
-				b := newBuffer(strm.Reader(), 0)
-				b.allowEOF = true
-				for i := 0; i < n; i++ {
-					id, _ := b.readToken().(int64)
-					off, _ := b.readToken().(int64)
-					if uint32(id) == ptr.id {
-						b.seekForward(first + off)
-						x = b.readObject()
-						break Search
-					}
-				}
-				ext := strm.Key("Extends")
-				if ext.Kind() != Stream {
-					panic("cannot find object in stream")
-				}
-				strm = ext
-			}
+		if xr.inStream {
+			x = r.resolveInStream(parent, ptr, xr)
 		} else {
-			b := newBuffer(io.NewSectionReader(r.f, xref.offset, r.end-xref.offset), xref.offset)
+			b := newBuffer(io.NewSectionReader(r.f, xr.offset, r.end-xr.offset), xr.offset)
 			b.key = r.key
 			b.useAES = r.useAES
-			obj = b.readObject()
+			obj := b.readObject()
 			def, ok := obj.(objdef)
 			if !ok {
 				panic(fmt.Errorf("loading %v: found %T instead of objdef", ptr, obj))
-				//return Value{}
 			}
 			if def.ptr != ptr {
 				panic(fmt.Errorf("loading %v: found %v", ptr, def.ptr))
@@ -995,50 +1014,55 @@ var passwordPad = []byte{
 	0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 }
 
-func (r *Reader) initEncrypt(password string) error {
-	// See PDF 32000-1:2008, §7.6.
-	encrypt, _ := r.resolve(objptr{}, r.trailer["Encrypt"]).data.(dict)
+// parseEncryptBody extracts and validates n, O, U, P, and ID from the
+// Standard encryption dictionary and the file trailer.
+func parseEncryptBody(encrypt dict, trailer dict) (n int64, O, U string, P uint32, ID []byte, err error) {
 	if encrypt["Filter"] != name("Standard") {
-		return fmt.Errorf("unsupported PDF: encryption filter %v", objfmt(encrypt["Filter"]))
+		return 0, "", "", 0, nil, fmt.Errorf("unsupported PDF: encryption filter %v", objfmt(encrypt["Filter"]))
 	}
-	n, _ := encrypt["Length"].(int64)
+	n, _ = encrypt["Length"].(int64)
 	if n == 0 {
 		n = 40
 	}
 	if n%8 != 0 || n > 128 || n < 40 {
-		return fmt.Errorf("malformed PDF: %d-bit encryption key", n)
+		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: %d-bit encryption key", n)
 	}
-	V, _ := encrypt["V"].(int64)
-	if V != 1 && V != 2 && (V != 4 || !okayV4(encrypt)) {
-		return fmt.Errorf("unsupported PDF: encryption version V=%d; %v", V, objfmt(encrypt))
-	}
-
-	ids, ok := r.trailer["ID"].(array)
+	ids, ok := trailer["ID"].(array)
 	if !ok || len(ids) < 1 {
-		return fmt.Errorf("malformed PDF: missing ID in trailer")
+		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: missing ID in trailer")
 	}
 	idstr, ok := ids[0].(string)
 	if !ok {
-		return fmt.Errorf("malformed PDF: missing ID in trailer")
+		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: missing ID in trailer")
 	}
-	ID := []byte(idstr)
-
-	R, _ := encrypt["R"].(int64)
-	if R < 2 {
-		return fmt.Errorf("malformed PDF: encryption revision R=%d", R)
-	}
-	if R > 4 {
-		return fmt.Errorf("unsupported PDF: encryption revision R=%d", R)
-	}
-	O, _ := encrypt["O"].(string)
-	U, _ := encrypt["U"].(string)
+	O, _ = encrypt["O"].(string)
+	U, _ = encrypt["U"].(string)
 	if len(O) != 32 || len(U) != 32 {
-		return fmt.Errorf("malformed PDF: missing O= or U= encryption parameters")
+		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: missing O= or U= encryption parameters")
 	}
 	p, _ := encrypt["P"].(int64)
-	P := uint32(p)
+	return n, O, U, uint32(p), []byte(idstr), nil
+}
 
-	// TODO: Password should be converted to Latin-1.
+// parseEncryptHeader validates the V version and R revision of the encrypt dict.
+func parseEncryptHeader(encrypt dict) (V, R int64, err error) {
+	V, _ = encrypt["V"].(int64)
+	if V != 1 && V != 2 && (V != 4 || !okayV4(encrypt)) {
+		return 0, 0, fmt.Errorf("unsupported PDF: encryption version V=%d; %v", V, objfmt(encrypt))
+	}
+	R, _ = encrypt["R"].(int64)
+	if R < 2 {
+		return 0, 0, fmt.Errorf("malformed PDF: encryption revision R=%d", R)
+	}
+	if R > 4 {
+		return 0, 0, fmt.Errorf("unsupported PDF: encryption revision R=%d", R)
+	}
+	return V, R, nil
+}
+
+// buildEncryptKey computes the RC4 encryption key and cipher from the given
+// PDF Standard encryption parameters (PDF 32000-1:2008 §7.6.3.3).
+func buildEncryptKey(password, O string, P uint32, n, R int64, ID []byte) ([]byte, *rc4.Cipher, error) {
 	pw := []byte(password)
 	h := md5.New()
 	if len(pw) >= 32 {
@@ -1049,9 +1073,8 @@ func (r *Reader) initEncrypt(password string) error {
 	}
 	h.Write([]byte(O))
 	h.Write([]byte{byte(P), byte(P >> 8), byte(P >> 16), byte(P >> 24)})
-	h.Write([]byte(ID))
+	h.Write(ID)
 	key := h.Sum(nil)
-
 	if R >= 3 {
 		for i := 0; i < 50; i++ {
 			h.Reset()
@@ -1062,24 +1085,27 @@ func (r *Reader) initEncrypt(password string) error {
 	} else {
 		key = key[:40/8]
 	}
-
 	c, err := rc4.NewCipher(key)
 	if err != nil {
-		return fmt.Errorf("malformed PDF: invalid RC4 key: %v", err)
+		return nil, nil, fmt.Errorf("malformed PDF: invalid RC4 key: %v", err)
 	}
+	return key, c, nil
+}
 
+// verifyEncryptKey checks the computed key against the U entry in the
+// encryption dictionary (PDF 32000-1:2008 §7.6.3.4).
+func verifyEncryptKey(R int64, key []byte, c *rc4.Cipher, U string, ID []byte) bool {
 	var u []byte
 	if R == 2 {
 		u = make([]byte, 32)
 		copy(u, passwordPad)
 		c.XORKeyStream(u, u)
 	} else {
-		h.Reset()
+		h := md5.New()
 		h.Write(passwordPad)
-		h.Write([]byte(ID))
+		h.Write(ID)
 		u = h.Sum(nil)
 		c.XORKeyStream(u, u)
-
 		for i := 1; i <= 19; i++ {
 			key1 := make([]byte, len(key))
 			copy(key1, key)
@@ -1090,14 +1116,28 @@ func (r *Reader) initEncrypt(password string) error {
 			c.XORKeyStream(u, u)
 		}
 	}
+	return bytes.HasPrefix([]byte(U), u)
+}
 
-	if !bytes.HasPrefix([]byte(U), u) {
+func (r *Reader) initEncrypt(password string) error {
+	encrypt, _ := r.resolve(objptr{}, r.trailer["Encrypt"]).data.(dict)
+	n, O, U, P, ID, err := parseEncryptBody(encrypt, r.trailer)
+	if err != nil {
+		return err
+	}
+	V, R, err := parseEncryptHeader(encrypt)
+	if err != nil {
+		return err
+	}
+	key, c, err := buildEncryptKey(password, O, P, n, R, ID)
+	if err != nil {
+		return err
+	}
+	if !verifyEncryptKey(R, key, c, U, ID) {
 		return ErrInvalidPassword
 	}
-
 	r.key = key
 	r.useAES = V == 4
-
 	return nil
 }
 
