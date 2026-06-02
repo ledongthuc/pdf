@@ -9,6 +9,7 @@ type walkState struct {
 	enc       TextEncoding
 	x, y      float64
 	tl        float64
+	fontSize  float64
 	fonts     map[string]*Font
 	walker    func(TextEncoding, float64, float64, string)
 	resources Value
@@ -36,6 +37,7 @@ func (s *walkState) handleWalkFont(op string, args []Value) {
 		} else {
 			s.enc = &nopEncoder{}
 		}
+		s.fontSize = args[1].Float64()
 	}
 }
 
@@ -63,10 +65,20 @@ func (s *walkState) handleWalkShow(op string, args []Value) {
 
 func (s *walkState) handleWalkShowArray(args []Value) {
 	v := args[0]
+	needSpace := false
 	for i := 0; i < v.Len(); i++ {
 		x := v.Index(i)
 		if x.Kind() == String {
+			if needSpace {
+				s.walker(s.enc, s.x, s.y, " ")
+				needSpace = false
+			}
 			s.walker(s.enc, s.x, s.y, x.RawString())
+		} else {
+			s.x -= x.Float64() / 1000 * s.fontSize
+			if x.Float64() <= -tjSpaceThreshold {
+				needSpace = true
+			}
 		}
 	}
 }
