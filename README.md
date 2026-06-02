@@ -160,7 +160,7 @@ func main() {
 | [#21](https://github.com/ledongthuc/pdf/issues/21) | unknown encoding UniGB-UCS2-H | Same fix as #55 — `ucs2BEEncoder` handles `UniGB-UCS2-H` | Directly fixed |
 | [#22](https://github.com/ledongthuc/pdf/issues/22) | Handle space after header | Relaxed byte-8 check in `NewReaderEncrypted` to accept space/tab | Directly fixed |
 | [#27](https://github.com/ledongthuc/pdf/issues/27) | GetTextByRow returns empty rows | `Td` in `walkTextBlocks` now updates `currentX`/`currentY` additively instead of emitting a spurious empty walker call; `TD` and `TL` wired; `T*` decrements Y by leading | Directly fixed |
-| [#30](https://github.com/ledongthuc/pdf/issues/30) | crash when encountering some CJK text amongst English | `dictEncoder` rewrite; `maxObjectDepth` guard; `readArray` EOF fix | Directly fixed |
+| [#30](https://github.com/ledongthuc/pdf/issues/30) | crash when encountering some CJK text amongst English | Same root cause as #57 — `readHexString` hit binary pixel data from an inline image (`BI … ID … EI`); fixed by the same `readHexString` EOF guard in `lex.go` and `case "ID":` inline-image skip in `ps.go` `Interpret()` | Directly fixed |
 | [#31](https://github.com/ledongthuc/pdf/issues/31) | Expose page dimensions | `Page.MediaBox()` and `Page.CropBox()` added; both walk the page-tree inheritance chain; `CropBox` falls back to `MediaBox` when absent | Directly fixed |
 | [#44](https://github.com/ledongthuc/pdf/issues/44) | Cannot read Chinese | GBK / Big5 / UniGB / UniCNS CMaps all wired in `getEncoder()` | Directly fixed |
 | [#48](https://github.com/ledongthuc/pdf/issues/48) | `\n` added by recent version breaks old systems | Removed `showText("\n")` from `case "BT":` — BT is matrix-init, not line-break | Directly fixed |
