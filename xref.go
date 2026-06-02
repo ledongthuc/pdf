@@ -75,7 +75,7 @@ func followXrefStreamPrevChain(r *Reader, table []xref, size int64, hdr dict) ([
 // applyPrevXrefStream loads one "Prev" xref stream at absOffset, applies it to
 // table, and returns the updated table and the next Prev value (nil when the
 // chain ends).
-func applyPrevXrefStream(r *Reader, absOffset int64, table []xref, maxSize int64) ([]xref, interface{}, error) {
+func applyPrevXrefStream(r *Reader, absOffset int64, table []xref, maxSize int64) ([]xref, any, error) {
 	b := newBuffer(io.NewSectionReader(r.f, absOffset, r.end-absOffset), absOffset)
 	obj1 := b.readObject()
 	obj, ok := obj1.(objdef)
@@ -226,7 +226,7 @@ func followXrefTablePrevChain(r *Reader, table []xref, trailer dict) ([]xref, er
 // applyPrevXrefTable loads one "Prev" xref table at absOffset, applies it to
 // table, and returns the updated table and the next Prev value (nil when the
 // chain ends).
-func applyPrevXrefTable(r *Reader, absOffset int64, table []xref) ([]xref, interface{}, error) {
+func applyPrevXrefTable(r *Reader, absOffset int64, table []xref) ([]xref, any, error) {
 	b := newBuffer(io.NewSectionReader(r.f, absOffset, r.end-absOffset), absOffset)
 	if tok := b.readToken(); tok != keyword("xref") {
 		return nil, nil, fmt.Errorf("xref Prev does not point to xref")
@@ -355,10 +355,7 @@ func findStartxrefFallback(f io.ReaderAt, size int64) (int64, error) {
 
 	var suffix []byte
 	for pos := size; pos > 0; {
-		start := pos - scanChunk
-		if start < 0 {
-			start = 0
-		}
+		start := max(pos-scanChunk, 0)
 		chunkLen := pos - start
 		combined := make([]byte, chunkLen+int64(len(suffix)))
 		f.ReadAt(combined[:chunkLen], start)
@@ -366,10 +363,7 @@ func findStartxrefFallback(f io.ReaderAt, size int64) (int64, error) {
 
 		if idx := bytes.LastIndex(combined, []byte("%%EOF")); idx >= 0 {
 			eofAbs := start + int64(idx)
-			ctxStart := eofAbs - 512
-			if ctxStart < 0 {
-				ctxStart = 0
-			}
+			ctxStart := max(eofAbs-512, 0)
 			ctx := make([]byte, eofAbs-ctxStart)
 			f.ReadAt(ctx, ctxStart)
 			j := findLastLine(ctx, "startxref")
@@ -411,10 +405,7 @@ func validatePDFHeader(f io.ReaderAt) error {
 // when %%EOF is not found there, it falls back to a full reverse scan.
 func findStartxrefOffset(f io.ReaderAt, size int64) (int64, error) {
 	const endChunk = 1024
-	readStart := size - endChunk
-	if readStart < 0 {
-		readStart = 0
-	}
+	readStart := max(size-endChunk, 0)
 	buf := make([]byte, size-readStart)
 	f.ReadAt(buf, readStart)
 	buf = bytes.TrimRight(buf, "\r\n\t ")

@@ -12,7 +12,7 @@ import (
 type Value struct {
 	r    *Reader
 	ptr  objptr
-	data interface{}
+	data any
 }
 
 // IsNull reports whether the value is a null. It is equivalent to Kind() == Null.
@@ -41,14 +41,14 @@ func (v Value) Kind() ValueKind {
 	return kindOfData(v.data)
 }
 
-func kindOfData(data interface{}) ValueKind {
+func kindOfData(data any) ValueKind {
 	if k := kindOfScalar(data); k != Null {
 		return k
 	}
 	return kindOfContainer(data)
 }
 
-func kindOfScalar(data interface{}) ValueKind {
+func kindOfScalar(data any) ValueKind {
 	switch data.(type) {
 	case bool:
 		return Bool
@@ -65,7 +65,7 @@ func kindOfScalar(data interface{}) ValueKind {
 	}
 }
 
-func kindOfContainer(data interface{}) ValueKind {
+func kindOfContainer(data any) ValueKind {
 	switch data.(type) {
 	case dict:
 		return Dict

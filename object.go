@@ -30,7 +30,7 @@ const maxObjectDepth = 1000
 //	objdef, a PDF object definition
 //
 // An object may also be nil, to represent the PDF null.
-type object interface{}
+type object any
 
 type dict map[name]object
 
@@ -99,7 +99,7 @@ func fmtArray(a array) string {
 	return buf.String()
 }
 
-func objfmt(x interface{}) string {
+func objfmt(x any) string {
 	switch x := x.(type) {
 	case string:
 		return fmtString(x)

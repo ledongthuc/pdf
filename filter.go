@@ -39,7 +39,7 @@ func (a *alphaReader) Read(p []byte) (int, error) {
 	}
 	buf := make([]byte, n)
 	tilda := false
-	for i := 0; i < n; i++ {
+	for i := range n {
 		char := checkASCII85(p[i])
 		if char == '>' && tilda { // end of data
 			break

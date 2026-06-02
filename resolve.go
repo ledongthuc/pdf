@@ -32,7 +32,7 @@ func objStmHeader(strm Value) (n int, first int64) {
 // matches ptr.id it seeks to first+offset and returns the decoded object.
 // ok is false when the id is not found in this stream's index.
 func scanObjStmIndex(b *buffer, n int, first int64, ptr objptr) (obj object, ok bool) {
-	for i := 0; i < n; i++ {
+	for range n {
 		id, _ := b.readToken().(int64)
 		off, _ := b.readToken().(int64)
 		if uint32(id) == ptr.id {
@@ -45,7 +45,7 @@ func scanObjStmIndex(b *buffer, n int, first int64, ptr objptr) (obj object, ok 
 
 // resolveInStream locates ptr inside an ObjStm (object stream) by scanning
 // the index entries, following Extends chains as needed.
-func (r *Reader) resolveInStream(parent objptr, ptr objptr, xr xref) interface{} {
+func (r *Reader) resolveInStream(parent objptr, ptr objptr, xr xref) any {
 	strm := r.resolve(parent, xr.stream)
 	for {
 		n, first := objStmHeader(strm)
@@ -79,7 +79,7 @@ func (r *Reader) loadDirectObject(ptr objptr, xr xref) object {
 	return def.obj
 }
 
-func (r *Reader) resolve(parent objptr, x interface{}) Value {
+func (r *Reader) resolve(parent objptr, x any) Value {
 	if ptr, ok := x.(objptr); ok {
 		if ptr.id >= uint32(len(r.xref)) {
 			return Value{}
