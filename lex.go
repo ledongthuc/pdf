@@ -126,19 +126,15 @@ func (b *buffer) unreadToken(t token) {
 	b.unread = append(b.unread, t)
 }
 
-func (b *buffer) readToken() token {
-	if n := len(b.unread); n > 0 {
-		t := b.unread[n-1]
-		b.unread = b.unread[:n-1]
-		return t
-	}
-
-	// Find first non-space, non-comment byte.
+// skipSpaceAndComments advances past whitespace and % comments, returning
+// the first non-whitespace byte and a bool that is true if EOF was reached
+// during whitespace (the caller should return io.EOF in that case).
+func (b *buffer) skipSpaceAndComments() (byte, bool) {
 	c := b.readByte()
 	for {
 		if isSpace(c) {
 			if b.eof {
-				return io.EOF
+				return 0, true
 			}
 			c = b.readByte()
 		} else if c == '%' {
@@ -149,14 +145,34 @@ func (b *buffer) readToken() token {
 			break
 		}
 	}
+	return c, false
+}
+
+// readAngleBracketOpen handles the '<' case: '<<' becomes the dict-open
+// keyword; anything else is a hex string.
+func (b *buffer) readAngleBracketOpen() token {
+	if b.readByte() == '<' {
+		return keyword("<<")
+	}
+	b.unreadByte()
+	return b.readHexString()
+}
+
+func (b *buffer) readToken() token {
+	if n := len(b.unread); n > 0 {
+		t := b.unread[n-1]
+		b.unread = b.unread[:n-1]
+		return t
+	}
+
+	c, eof := b.skipSpaceAndComments()
+	if eof {
+		return io.EOF
+	}
 
 	switch c {
 	case '<':
-		if b.readByte() == '<' {
-			return keyword("<<")
-		}
-		b.unreadByte()
-		return b.readHexString()
+		return b.readAngleBracketOpen()
 
 	case '(':
 		return b.readLiteralString()
@@ -171,8 +187,10 @@ func (b *buffer) readToken() token {
 		if b.readByte() == '>' {
 			return keyword(">>")
 		}
+		// '>' alone is a delimiter; '<<'/'>>'-pairing is the only valid use.
 		b.unreadByte()
-		fallthrough
+		b.errorf("unexpected delimiter %#q", rune(c))
+		return nil
 
 	default:
 		if isDelim(c) {
@@ -229,6 +247,50 @@ func unhex(b byte) int {
 	return -1
 }
 
+// appendEscape decodes the backslash-escape sequence whose character after
+// the backslash is c, appends the decoded bytes to tmp, and returns the
+// grown slice. The leading backslash has already been consumed by the caller.
+func (b *buffer) appendEscape(tmp []byte, c byte) []byte {
+	switch c {
+	default:
+		b.errorf("invalid escape sequence \\%c", c)
+		return append(tmp, '\\', c)
+	case 'n':
+		return append(tmp, '\n')
+	case 'r':
+		return append(tmp, '\r')
+	case 'b':
+		return append(tmp, '\b')
+	case 't':
+		return append(tmp, '\t')
+	case 'f':
+		return append(tmp, '\f')
+	case '(', ')', '\\':
+		return append(tmp, c)
+	case '\r':
+		if b.readByte() != '\n' {
+			b.unreadByte()
+		}
+		return tmp // line continuation — no character appended
+	case '\n':
+		return tmp // line continuation — no character appended
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		x := int(c - '0')
+		for i := 0; i < 2; i++ {
+			c = b.readByte()
+			if c < '0' || c > '7' {
+				b.unreadByte()
+				break
+			}
+			x = x*8 + int(c-'0')
+		}
+		if x > 255 {
+			b.errorf("invalid octal escape \\%03o", x)
+		}
+		return append(tmp, byte(x))
+	}
+}
+
 func (b *buffer) readLiteralString() token {
 	tmp := b.tmp[:0]
 	depth := 1
@@ -236,8 +298,6 @@ Loop:
 	for !b.eof {
 		c := b.readByte()
 		switch c {
-		default:
-			tmp = append(tmp, c)
 		case '(':
 			depth++
 			tmp = append(tmp, c)
@@ -247,44 +307,9 @@ Loop:
 			}
 			tmp = append(tmp, c)
 		case '\\':
-			switch c = b.readByte(); c {
-			default:
-				b.errorf("invalid escape sequence \\%c", c)
-				tmp = append(tmp, '\\', c)
-			case 'n':
-				tmp = append(tmp, '\n')
-			case 'r':
-				tmp = append(tmp, '\r')
-			case 'b':
-				tmp = append(tmp, '\b')
-			case 't':
-				tmp = append(tmp, '\t')
-			case 'f':
-				tmp = append(tmp, '\f')
-			case '(', ')', '\\':
-				tmp = append(tmp, c)
-			case '\r':
-				if b.readByte() != '\n' {
-					b.unreadByte()
-				}
-				fallthrough
-			case '\n':
-				// no append
-			case '0', '1', '2', '3', '4', '5', '6', '7':
-				x := int(c - '0')
-				for i := 0; i < 2; i++ {
-					c = b.readByte()
-					if c < '0' || c > '7' {
-						b.unreadByte()
-						break
-					}
-					x = x*8 + int(c-'0')
-				}
-				if x > 255 {
-					b.errorf("invalid octal escape \\%03o", x)
-				}
-				tmp = append(tmp, byte(x))
-			}
+			tmp = b.appendEscape(tmp, b.readByte())
+		default:
+			tmp = append(tmp, c)
 		}
 	}
 	b.tmp = tmp
@@ -417,6 +442,59 @@ type objdef struct {
 	obj object
 }
 
+// readKeywordObject dispatches a keyword token to the appropriate object
+// constructor. It is called by readObject when the first token is a keyword.
+func (b *buffer) readKeywordObject(kw keyword) object {
+	switch kw {
+	case "null":
+		return nil
+	case "<<":
+		return b.readDict()
+	case "[":
+		return b.readArray()
+	case ">>", "]":
+		// end-of-container sentinel; stop object parsing here
+		return nil
+	}
+	b.errorf("unexpected keyword %q parsing object", kw)
+	return nil
+}
+
+// tryReadObjRef attempts to read the gen-number and 'R'/'obj' keyword that
+// follow an object-id integer t1, completing an indirect reference (objptr)
+// or definition (objdef). Returns (result, true) on success. On failure it
+// unreads the extra tokens (tok3 then tok2, LIFO) and returns (nil, false)
+// so the caller can fall back to returning t1 directly.
+func (b *buffer) tryReadObjRef(t1 int64) (object, bool) {
+	tok2 := b.readToken()
+	t2, ok := tok2.(int64)
+	if !ok || int64(uint16(t2)) != t2 {
+		b.unreadToken(tok2)
+		return nil, false
+	}
+	tok3 := b.readToken()
+	switch tok3 {
+	case keyword("R"):
+		return objptr{uint32(t1), uint16(t2)}, true
+	case keyword("obj"):
+		old := b.objptr
+		b.objptr = objptr{uint32(t1), uint16(t2)}
+		obj := b.readObject()
+		if _, ok := obj.(stream); !ok {
+			tok4 := b.readToken()
+			if tok4 != keyword("endobj") {
+				b.errorf("missing endobj after indirect object definition")
+				b.unreadToken(tok4)
+			}
+		}
+		b.objptr = old
+		return objdef{objptr{uint32(t1), uint16(t2)}, obj}, true
+	}
+	b.unreadToken(tok3)
+	b.unreadToken(tok2)
+	return nil, false
+}
+
 func (b *buffer) readObject() object {
 	b.depth++
 	defer func() { b.depth-- }()
@@ -427,19 +505,7 @@ func (b *buffer) readObject() object {
 
 	tok := b.readToken()
 	if kw, ok := tok.(keyword); ok {
-		switch kw {
-		case "null":
-			return nil
-		case "<<":
-			return b.readDict()
-		case "[":
-			return b.readArray()
-		case ">>", "]":
-			// stop the object - these mark the end of dict/array
-			return nil
-		}
-		b.errorf("unexpected keyword %q parsing object", kw)
-		return nil
+		return b.readKeywordObject(kw)
 	}
 
 	if str, ok := tok.(string); ok && b.key != nil && b.objptr.id != 0 {
@@ -451,29 +517,9 @@ func (b *buffer) readObject() object {
 	}
 
 	if t1, ok := tok.(int64); ok && int64(uint32(t1)) == t1 {
-		tok2 := b.readToken()
-		if t2, ok := tok2.(int64); ok && int64(uint16(t2)) == t2 {
-			tok3 := b.readToken()
-			switch tok3 {
-			case keyword("R"):
-				return objptr{uint32(t1), uint16(t2)}
-			case keyword("obj"):
-				old := b.objptr
-				b.objptr = objptr{uint32(t1), uint16(t2)}
-				obj := b.readObject()
-				if _, ok := obj.(stream); !ok {
-					tok4 := b.readToken()
-					if tok4 != keyword("endobj") {
-						b.errorf("missing endobj after indirect object definition")
-						b.unreadToken(tok4)
-					}
-				}
-				b.objptr = old
-				return objdef{objptr{uint32(t1), uint16(t2)}, obj}
-			}
-			b.unreadToken(tok3)
+		if result, matched := b.tryReadObjRef(t1); matched {
+			return result
 		}
-		b.unreadToken(tok2)
 	}
 	return tok
 }

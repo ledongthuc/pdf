@@ -196,6 +196,40 @@ func TestInterpretInlineImage(t *testing.T) {
 	}
 }
 
+// TestReadLiteralStringEscapes verifies appendEscape handles all escape
+// families: named (\n), octal (\101 = 'A'), literal-paren \(, and
+// literal-backslash \\. These branches have no other test coverage.
+func TestReadLiteralStringEscapes(t *testing.T) {
+	// PDF string: (a\nb\101c\(d\\e)
+	b := newBuffer(strings.NewReader("(a\\nb\\101c\\(d\\\\e)"), 0)
+	b.allowEOF = true
+	tok := b.readToken()
+	got, ok := tok.(string)
+	if !ok {
+		t.Fatalf("expected string token, got %T(%v)", tok, tok)
+	}
+	want := "a\nbAc(d\\e"
+	if got != want {
+		t.Fatalf("readLiteralString escapes: got %q, want %q", got, want)
+	}
+}
+
+// TestReadLiteralStringLineContinuation verifies that \<CR>, \<LF>, and
+// \<CR><LF> are all treated as line-continuation (no character appended).
+func TestReadLiteralStringLineContinuation(t *testing.T) {
+	// "\\\r\\\n\\\r\n" → three line continuations → empty string
+	b := newBuffer(strings.NewReader("(\\\r\\\n\\\r\n)"), 0)
+	b.allowEOF = true
+	tok := b.readToken()
+	got, ok := tok.(string)
+	if !ok {
+		t.Fatalf("expected string token, got %T(%v)", tok, tok)
+	}
+	if got != "" {
+		t.Fatalf("line continuations should yield empty string, got %q", got)
+	}
+}
+
 // TestInterpretDictStack exercises the execPS dict-stack path:
 // begin/def/end store a value; symbol lookup retrieves it without calling do;
 // end closes the dict; unknown operators beyond the dict scope reach do.
