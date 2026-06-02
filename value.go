@@ -38,9 +38,18 @@ const (
 
 // Kind reports the kind of value underlying v.
 func (v Value) Kind() ValueKind {
-	switch v.data.(type) {
-	default:
-		return Null
+	return kindOfData(v.data)
+}
+
+func kindOfData(data interface{}) ValueKind {
+	if k := kindOfScalar(data); k != Null {
+		return k
+	}
+	return kindOfContainer(data)
+}
+
+func kindOfScalar(data interface{}) ValueKind {
+	switch data.(type) {
 	case bool:
 		return Bool
 	case int64:
@@ -51,12 +60,21 @@ func (v Value) Kind() ValueKind {
 		return String
 	case name:
 		return Name
+	default:
+		return Null
+	}
+}
+
+func kindOfContainer(data interface{}) ValueKind {
+	switch data.(type) {
 	case dict:
 		return Dict
 	case array:
 		return Array
 	case stream:
 		return Stream
+	default:
+		return Null
 	}
 }
 
@@ -240,33 +258,45 @@ func (v Value) Reader() io.ReadCloser {
 	if streamLen == 0 {
 		return io.NopCloser(bytes.NewReader(nil))
 	}
+	rd := v.buildStreamReader(x, streamLen)
+	filter := v.Key("Filter")
+	param := v.Key("DecodeParms")
+	out, err := applyStreamFilters(rd, filter, param)
+	if err != nil {
+		return &errorReadCloser{err}
+	}
+	return io.NopCloser(out)
+}
+
+func (v Value) buildStreamReader(x stream, streamLen int64) io.Reader {
 	var rd io.Reader
 	rd = io.NewSectionReader(v.r.f, x.offset, streamLen)
 	if v.r.key != nil {
 		rd = decryptStream(v.r.key, v.r.useAES, x.ptr, rd)
 	}
-	filter := v.Key("Filter")
-	param := v.Key("DecodeParms")
+	return rd
+}
+
+func applyStreamFilters(rd io.Reader, filter, param Value) (io.Reader, error) {
 	switch filter.Kind() {
-	default:
-		return &errorReadCloser{fmt.Errorf("unsupported filter %v", filter)}
 	case Null:
-		// ok
+		return rd, nil
 	case Name:
-		var err error
-		rd, err = applyFilter(rd, filter.Name(), param)
-		if err != nil {
-			return &errorReadCloser{err}
-		}
+		return applyFilter(rd, filter.Name(), param)
 	case Array:
-		for i := 0; i < filter.Len(); i++ {
-			var err error
-			rd, err = applyFilter(rd, filter.Index(i).Name(), param.Index(i))
-			if err != nil {
-				return &errorReadCloser{err}
-			}
+		return applyArrayFilters(rd, filter, param)
+	default:
+		return nil, fmt.Errorf("unsupported filter %v", filter)
+	}
+}
+
+func applyArrayFilters(rd io.Reader, filter, param Value) (io.Reader, error) {
+	for i := 0; i < filter.Len(); i++ {
+		var err error
+		rd, err = applyFilter(rd, filter.Index(i).Name(), param.Index(i))
+		if err != nil {
+			return nil, err
 		}
 	}
-
-	return io.NopCloser(rd)
+	return rd, nil
 }
