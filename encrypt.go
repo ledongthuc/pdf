@@ -47,20 +47,13 @@ func parseEncryptBody(encrypt dict, trailer dict) (n int64, O, U string, P uint3
 	if encrypt["Filter"] != name("Standard") {
 		return 0, "", "", 0, nil, fmt.Errorf("unsupported PDF: encryption filter %v", objfmt(encrypt["Filter"]))
 	}
-	n, _ = encrypt["Length"].(int64)
-	if n == 0 {
-		n = 40
+	n, err = validateKeyLength(encrypt)
+	if err != nil {
+		return 0, "", "", 0, nil, err
 	}
-	if n%8 != 0 || n > 128 || n < 40 {
-		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: %d-bit encryption key", n)
-	}
-	ids, ok := trailer["ID"].(array)
-	if !ok || len(ids) < 1 {
-		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: missing ID in trailer")
-	}
-	idstr, ok := ids[0].(string)
-	if !ok {
-		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: missing ID in trailer")
+	ID, err = extractTrailerID(trailer)
+	if err != nil {
+		return 0, "", "", 0, nil, err
 	}
 	O, _ = encrypt["O"].(string)
 	U, _ = encrypt["U"].(string)
@@ -68,7 +61,33 @@ func parseEncryptBody(encrypt dict, trailer dict) (n int64, O, U string, P uint3
 		return 0, "", "", 0, nil, fmt.Errorf("malformed PDF: missing O= or U= encryption parameters")
 	}
 	p, _ := encrypt["P"].(int64)
-	return n, O, U, uint32(p), []byte(idstr), nil
+	return n, O, U, uint32(p), ID, nil
+}
+
+// validateKeyLength reads and validates the Length field of the encrypt dict,
+// defaulting to 40 when absent.
+func validateKeyLength(encrypt dict) (int64, error) {
+	n, _ := encrypt["Length"].(int64)
+	if n == 0 {
+		n = 40
+	}
+	if n%8 != 0 || n > 128 || n < 40 {
+		return 0, fmt.Errorf("malformed PDF: %d-bit encryption key", n)
+	}
+	return n, nil
+}
+
+// extractTrailerID retrieves the first element of the ID array from the trailer.
+func extractTrailerID(trailer dict) ([]byte, error) {
+	ids, ok := trailer["ID"].(array)
+	if !ok || len(ids) < 1 {
+		return nil, fmt.Errorf("malformed PDF: missing ID in trailer")
+	}
+	idstr, ok := ids[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("malformed PDF: missing ID in trailer")
+	}
+	return []byte(idstr), nil
 }
 
 // parseEncryptHeader validates the V version and R revision of the encrypt dict.
@@ -187,16 +206,19 @@ func okayV4(encrypt dict) bool {
 		return false
 	}
 	cfparam, _ := cf[stmf].(dict)
+	return validateCFParam(cfparam)
+}
+
+// validateCFParam checks that the crypt filter parameter dict is compatible
+// with the subset of V4 encryption this library supports (AESV2, DocOpen).
+func validateCFParam(cfparam dict) bool {
 	if cfparam["AuthEvent"] != nil && cfparam["AuthEvent"] != name("DocOpen") {
 		return false
 	}
 	if cfparam["Length"] != nil && cfparam["Length"] != int64(16) {
 		return false
 	}
-	if cfparam["CFM"] != name("AESV2") {
-		return false
-	}
-	return true
+	return cfparam["CFM"] == name("AESV2")
 }
 
 func cryptKey(key []byte, useAES bool, ptr objptr) []byte {
