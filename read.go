@@ -91,10 +91,6 @@ type xref struct {
 	offset   int64
 }
 
-func (r *Reader) errorf(format string, args ...interface{}) {
-	panic(fmt.Errorf(format, args...))
-}
-
 // Open opens a file for reading.
 func Open(file string) (*os.File, *Reader, error) {
 	f, err := os.Open(file)

@@ -61,13 +61,6 @@ func newBuffer(r io.Reader, offset int64) *buffer {
 	}
 }
 
-func (b *buffer) seek(offset int64) {
-	b.offset = offset
-	b.buf = b.buf[:0]
-	b.pos = 0
-	b.unread = b.unread[:0]
-}
-
 func (b *buffer) readByte() byte {
 	if b.pos >= len(b.buf) {
 		b.reload()
