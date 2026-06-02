@@ -52,61 +52,71 @@ type objdef struct {
 	obj object
 }
 
+// fmtString formats a PDF string object, applying the appropriate decoding.
+func fmtString(s string) string {
+	if isPDFDocEncoded(s) {
+		return strconv.Quote(pdfDocDecode(s))
+	}
+	if isUTF16(s) {
+		return strconv.Quote(utf16Decode(s[2:]))
+	}
+	return strconv.Quote(s)
+}
+
+// fmtDict formats a PDF dictionary object as a "<<…>>" string.
+func fmtDict(d dict) string {
+	var keys []string
+	for k := range d {
+		keys = append(keys, string(k))
+	}
+	sort.Strings(keys)
+	var buf bytes.Buffer
+	buf.WriteString("<<")
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteString(" ")
+		}
+		buf.WriteString("/")
+		buf.WriteString(k)
+		buf.WriteString(" ")
+		buf.WriteString(objfmt(d[name(k)]))
+	}
+	buf.WriteString(">>")
+	return buf.String()
+}
+
+// fmtArray formats a PDF array object as a "[…]" string.
+func fmtArray(a array) string {
+	var buf bytes.Buffer
+	buf.WriteString("[")
+	for i, elem := range a {
+		if i > 0 {
+			buf.WriteString(" ")
+		}
+		buf.WriteString(objfmt(elem))
+	}
+	buf.WriteString("]")
+	return buf.String()
+}
+
 func objfmt(x interface{}) string {
 	switch x := x.(type) {
-	default:
-		return fmt.Sprint(x)
 	case string:
-		if isPDFDocEncoded(x) {
-			return strconv.Quote(pdfDocDecode(x))
-		}
-		if isUTF16(x) {
-			return strconv.Quote(utf16Decode(x[2:]))
-		}
-		return strconv.Quote(x)
+		return fmtString(x)
 	case name:
 		return "/" + string(x)
 	case dict:
-		var keys []string
-		for k := range x {
-			keys = append(keys, string(k))
-		}
-		sort.Strings(keys)
-		var buf bytes.Buffer
-		buf.WriteString("<<")
-		for i, k := range keys {
-			elem := x[name(k)]
-			if i > 0 {
-				buf.WriteString(" ")
-			}
-			buf.WriteString("/")
-			buf.WriteString(k)
-			buf.WriteString(" ")
-			buf.WriteString(objfmt(elem))
-		}
-		buf.WriteString(">>")
-		return buf.String()
-
+		return fmtDict(x)
 	case array:
-		var buf bytes.Buffer
-		buf.WriteString("[")
-		for i, elem := range x {
-			if i > 0 {
-				buf.WriteString(" ")
-			}
-			buf.WriteString(objfmt(elem))
-		}
-		buf.WriteString("]")
-		return buf.String()
-
+		return fmtArray(x)
 	case stream:
 		return fmt.Sprintf("%v@%d", objfmt(x.hdr), x.offset)
-
 	case objptr:
 		return fmt.Sprintf("%d %d R", x.id, x.gen)
-
 	case objdef:
 		return fmt.Sprintf("{%d %d obj}%v", x.ptr.id, x.ptr.gen, objfmt(x.obj))
+	default:
+		return fmt.Sprint(x)
 	}
 }
 
