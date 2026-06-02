@@ -7,8 +7,11 @@
 package pdf
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"sort"
+	"strconv"
 )
 
 const maxObjectDepth = 1000
@@ -47,6 +50,64 @@ type objptr struct {
 type objdef struct {
 	ptr objptr
 	obj object
+}
+
+func objfmt(x interface{}) string {
+	switch x := x.(type) {
+	default:
+		return fmt.Sprint(x)
+	case string:
+		if isPDFDocEncoded(x) {
+			return strconv.Quote(pdfDocDecode(x))
+		}
+		if isUTF16(x) {
+			return strconv.Quote(utf16Decode(x[2:]))
+		}
+		return strconv.Quote(x)
+	case name:
+		return "/" + string(x)
+	case dict:
+		var keys []string
+		for k := range x {
+			keys = append(keys, string(k))
+		}
+		sort.Strings(keys)
+		var buf bytes.Buffer
+		buf.WriteString("<<")
+		for i, k := range keys {
+			elem := x[name(k)]
+			if i > 0 {
+				buf.WriteString(" ")
+			}
+			buf.WriteString("/")
+			buf.WriteString(k)
+			buf.WriteString(" ")
+			buf.WriteString(objfmt(elem))
+		}
+		buf.WriteString(">>")
+		return buf.String()
+
+	case array:
+		var buf bytes.Buffer
+		buf.WriteString("[")
+		for i, elem := range x {
+			if i > 0 {
+				buf.WriteString(" ")
+			}
+			buf.WriteString(objfmt(elem))
+		}
+		buf.WriteString("]")
+		return buf.String()
+
+	case stream:
+		return fmt.Sprintf("%v@%d", objfmt(x.hdr), x.offset)
+
+	case objptr:
+		return fmt.Sprintf("%d %d R", x.id, x.gen)
+
+	case objdef:
+		return fmt.Sprintf("{%d %d obj}%v", x.ptr.id, x.ptr.gen, objfmt(x.obj))
+	}
 }
 
 // readKeywordObject dispatches a keyword token to the appropriate object
