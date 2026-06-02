@@ -14,36 +14,42 @@ type dictEncoder struct {
 
 func newDictEncoder(enc Value) *dictEncoder {
 	e := &dictEncoder{}
-	baseEnc := enc.Key("BaseEncoding")
-	var baseTable *[256]rune
+	copy(e.table[:], baseEncodingTable(enc.Key("BaseEncoding"))[:])
+	applyDifferences(&e.table, enc.Key("Differences"))
+	return e
+}
+
+// baseEncodingTable returns the standard 256-rune table for the named base encoding.
+func baseEncodingTable(baseEnc Value) *[256]rune {
 	switch baseEnc.Name() {
 	case "WinAnsiEncoding":
-		baseTable = &winAnsiEncoding
+		return &winAnsiEncoding
 	case "MacRomanEncoding":
-		baseTable = &macRomanEncoding
+		return &macRomanEncoding
 	default:
-		baseTable = &pdfDocEncoding
+		return &pdfDocEncoding
 	}
-	copy(e.table[:], baseTable[:])
+}
 
-	diff := enc.Key("Differences")
-	if diff.Kind() == Array {
-		code := -1
-		for j := 0; j < diff.Len(); j++ {
-			x := diff.Index(j)
-			if x.Kind() == Integer {
-				code = int(x.Int64())
-				continue
+// applyDifferences patches table with the name-to-code mappings from a PDF Differences array.
+func applyDifferences(table *[256]rune, diff Value) {
+	if diff.Kind() != Array {
+		return
+	}
+	code := -1
+	for j := 0; j < diff.Len(); j++ {
+		x := diff.Index(j)
+		if x.Kind() == Integer {
+			code = int(x.Int64())
+			continue
+		}
+		if x.Kind() == Name && code >= 0 && code < 256 {
+			if r := nameToRune[x.Name()]; r != 0 {
+				table[code] = r
 			}
-			if x.Kind() == Name && code >= 0 && code < 256 {
-				if r := nameToRune[x.Name()]; r != 0 {
-					e.table[code] = r
-				}
-				code++
-			}
+			code++
 		}
 	}
-	return e
 }
 
 func (e *dictEncoder) Decode(raw string) (text string) {
@@ -88,35 +94,40 @@ func (m *cmap) lookupBfchar(text string, n int) ([]rune, bool) {
 
 // lookupBfrange searches m.bfrange for an entry of length n whose range contains text.
 func (m *cmap) lookupBfrange(text string, n int) ([]rune, bool) {
-	for _, bfrange := range m.bfrange {
-		if len(bfrange.lo) == n && bfrange.lo <= text && text <= bfrange.hi {
-			if bfrange.dst.Kind() == String {
-				s := bfrange.dst.RawString()
-				if bfrange.lo != text {
-					b := []byte(s)
-					b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
-					s = string(b)
-				}
-				return []rune(utf16Decode(s)), true
-			}
-			if bfrange.dst.Kind() == Array {
-				idx := text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
-				v := bfrange.dst.Index(int(idx))
-				if v.Kind() == String {
-					return []rune(utf16Decode(v.RawString())), true
-				}
-				if DebugOn {
-					fmt.Printf("array %v\n", bfrange.dst)
-				}
-			} else {
-				if DebugOn {
-					fmt.Printf("unknown dst %v\n", bfrange.dst)
-				}
-			}
-			return []rune{noRune}, true
+	for _, entry := range m.bfrange {
+		if len(entry.lo) == n && entry.lo <= text && text <= entry.hi {
+			return decodeBfrange(entry, text)
 		}
 	}
 	return nil, false
+}
+
+// decodeBfrange maps text against a matched bfrange entry, handling String and Array destinations.
+func decodeBfrange(entry bfrange, text string) ([]rune, bool) {
+	if entry.dst.Kind() == String {
+		s := entry.dst.RawString()
+		if entry.lo != text {
+			b := []byte(s)
+			b[len(b)-1] += text[len(text)-1] - entry.lo[len(entry.lo)-1]
+			s = string(b)
+		}
+		return []rune(utf16Decode(s)), true
+	}
+	if entry.dst.Kind() == Array {
+		idx := text[len(text)-1] - entry.lo[len(entry.lo)-1]
+		v := entry.dst.Index(int(idx))
+		if v.Kind() == String {
+			return []rune(utf16Decode(v.RawString())), true
+		}
+		if DebugOn {
+			fmt.Printf("array %v\n", entry.dst)
+		}
+	} else {
+		if DebugOn {
+			fmt.Printf("unknown dst %v\n", entry.dst)
+		}
+	}
+	return []rune{noRune}, true
 }
 
 func (m *cmap) Decode(raw string) (text string) {
