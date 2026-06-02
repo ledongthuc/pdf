@@ -57,12 +57,16 @@ func (s *walkState) handleWalkShow(op string, args []Value) {
 		}
 		s.walker(s.enc, s.x, s.y, args[0].RawString())
 	case "TJ":
-		v := args[0]
-		for i := 0; i < v.Len(); i++ {
-			x := v.Index(i)
-			if x.Kind() == String {
-				s.walker(s.enc, s.x, s.y, x.RawString())
-			}
+		s.handleWalkShowArray(args)
+	}
+}
+
+func (s *walkState) handleWalkShowArray(args []Value) {
+	v := args[0]
+	for i := 0; i < v.Len(); i++ {
+		x := v.Index(i)
+		if x.Kind() == String {
+			s.walker(s.enc, s.x, s.y, x.RawString())
 		}
 	}
 }
@@ -89,6 +93,24 @@ func (s *walkState) handleWalkPos(op string, args []Value) {
 	}
 }
 
+func (s *walkState) handleWalkXObject(args []Value) {
+	if s.depth >= xobjMaxDepth || len(args) == 0 {
+		return
+	}
+	xobj := s.resources.Key("XObject").Key(args[0].Name())
+	if xobj.Key("Subtype").Name() != "Form" {
+		return
+	}
+	xobjRes := xobj.Key("Resources")
+	sub := &walkState{enc: &nopEncoder{}, resources: xobjRes, depth: s.depth + 1, walker: s.walker}
+	sub.fonts = make(map[string]*Font)
+	for _, fn := range xobjRes.Key("Font").Keys() {
+		f := Font{xobjRes.Key("Font").Key(fn), nil}
+		sub.fonts[fn] = &f
+	}
+	Interpret(xobj, sub.interpretWalk)
+}
+
 func (s *walkState) interpretWalk(stk *Stack, op string) {
 	n := stk.Len()
 	args := make([]Value, n)
@@ -103,21 +125,7 @@ func (s *walkState) interpretWalk(stk *Stack, op string) {
 	case "Td", "TD", "Tm":
 		s.handleWalkPos(op, args)
 	case "Do":
-		if s.depth >= xobjMaxDepth || len(args) == 0 {
-			break
-		}
-		xobj := s.resources.Key("XObject").Key(args[0].Name())
-		if xobj.Key("Subtype").Name() != "Form" {
-			break
-		}
-		xobjRes := xobj.Key("Resources")
-		sub := &walkState{enc: &nopEncoder{}, resources: xobjRes, depth: s.depth + 1, walker: s.walker}
-		sub.fonts = make(map[string]*Font)
-		for _, fn := range xobjRes.Key("Font").Keys() {
-			f := Font{xobjRes.Key("Font").Key(fn), nil}
-			sub.fonts[fn] = &f
-		}
-		Interpret(xobj, sub.interpretWalk)
+		s.handleWalkXObject(args)
 	}
 }
 
