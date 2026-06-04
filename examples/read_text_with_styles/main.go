@@ -1,9 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/Detective-XH/pdf"
 )
 
 func main() {
@@ -13,7 +14,7 @@ func main() {
 	}
 	defer f.Close()
 
-	sentences, err := r.GetStyledTexts()
+	sentences, err := r.GetStyledTexts(context.Background())
 	if err != nil {
 		panic(err)
 	}

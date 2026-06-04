@@ -5,7 +5,6 @@
 package pdf
 
 import (
-	"fmt"
 	"io"
 )
 
@@ -37,6 +36,172 @@ func newDict() Value {
 	return Value{nil, objptr{}, make(dict)}
 }
 
+// openInterpBuffer builds a buffer from strm, handling both a single stream
+// and an Array of streams (concatenated via io.MultiReader).
+func openInterpBuffer(strm Value) *buffer {
+	var b *buffer
+	if strm.Kind() == Array {
+		n := strm.Len()
+		readers := make([]io.Reader, n)
+		for i := range n {
+			readers[i] = strm.Index(i).Reader()
+		}
+		b = newBuffer(io.MultiReader(readers...), 0)
+	} else {
+		b = newBuffer(strm.Reader(), 0)
+	}
+	b.allowEOF = true
+	b.allowObjptr = false
+	b.allowStream = false
+	return b
+}
+
+// execDef implements the PostScript "def" operator: pops a name key and a
+// value, then stores the pair in the top dictionary. Returns false without
+// storing if the key is not a name (silent skip per PS semantics).
+func execDef(stk *Stack, dicts *[]dict) {
+	if len(*dicts) <= 0 {
+		panic("def without open dict")
+	}
+	val := stk.Pop()
+	key, ok := stk.Pop().data.(name)
+	if !ok {
+		return
+	}
+	(*dicts)[len(*dicts)-1][key] = val.data
+}
+
+func psDict(stk *Stack) {
+	stk.Pop()
+	stk.Push(Value{nil, objptr{}, make(dict)})
+}
+
+func psCurrentdict(stk *Stack, dicts *[]dict) {
+	if len(*dicts) == 0 {
+		panic("no current dictionary")
+	}
+	stk.Push(Value{nil, objptr{}, (*dicts)[len(*dicts)-1]})
+}
+
+func psBegin(stk *Stack, dicts *[]dict) {
+	d := stk.Pop()
+	if d.Kind() != Dict {
+		panic("cannot begin non-dict")
+	}
+	*dicts = append(*dicts, d.data.(dict))
+}
+
+func psEnd(dicts *[]dict) {
+	if len(*dicts) <= 0 {
+		panic("mismatched begin/end")
+	}
+	*dicts = (*dicts)[:len(*dicts)-1]
+}
+
+// execPS handles the built-in PostScript dict-stack operators (dict,
+// currentdict, begin, end, def, pop). Returns true if kw was consumed,
+// false if it is not a PS dict operator and must be dispatched to the
+// caller's do function.
+func execPS(kw string, stk *Stack, dicts *[]dict) bool {
+	switch kw {
+	case "dict":
+		psDict(stk)
+	case "currentdict":
+		psCurrentdict(stk, dicts)
+	case "begin":
+		psBegin(stk, dicts)
+	case "end":
+		psEnd(dicts)
+	case "def":
+		execDef(stk, dicts)
+	case "pop":
+		stk.Pop()
+	default:
+		return false
+	}
+	return true
+}
+
+// eiKeywordTerminates reads the byte after "EI" and returns true if that byte
+// confirms a keyword boundary (whitespace, delimiter, or EOF). It unreads the
+// byte when it does not consume it, leaving the buffer position correct for
+// either outcome.
+func eiKeywordTerminates(b *buffer) bool {
+	c := b.readByte()
+	if b.eof {
+		return true
+	}
+	if isSpace(c) || isDelim(c) {
+		b.unreadByte()
+		return true
+	}
+	b.unreadByte()
+	return false
+}
+
+// skipInlineImage scans past inline image binary data until the EI keyword.
+// Inline image: binary pixel data follows ID until the EI keyword.
+// Scan byte-by-byte; calling readToken on raw binary would feed
+// the lexer arbitrary bytes (e.g. 0x3c triggering readHexString)
+// and loop indefinitely.  Per PDF spec §8.9.7, EI must be
+// preceded by a whitespace character.
+func skipInlineImage(b *buffer) {
+	for !b.eof {
+		c := b.readByte()
+		if c != 'E' {
+			continue
+		}
+		c2 := b.readByte()
+		if b.eof {
+			break
+		}
+		if c2 != 'I' {
+			b.unreadByte()
+			continue
+		}
+		if eiKeywordTerminates(b) {
+			break
+		}
+	}
+}
+
+// lookupInDicts searches dicts from innermost to outermost for kw and pushes
+// the found value onto stk. Returns true if found, false otherwise.
+func lookupInDicts(kw keyword, stk *Stack, dicts []dict) bool {
+	for i := len(dicts) - 1; i >= 0; i-- {
+		if v, ok := dicts[i][name(kw)]; ok {
+			stk.Push(Value{nil, objptr{}, v})
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchKeyword executes one keyword token from the PostScript stream.
+// Returns true if the caller's main loop should continue to the next token
+// (i.e. a dict lookup matched and the value was pushed), false to fall through.
+func dispatchKeyword(kw keyword, stk *Stack, dicts *[]dict, b *buffer, do func(stk *Stack, op string)) bool {
+	switch kw {
+	// "null", "[", "]", "<<", ">>" are PDF structural tokens that must be
+	// re-read as full objects via readObject — do not dispatch to do() or execPS.
+	case "null", "[", "]", "<<", ">>":
+		b.unreadToken(kw)
+		stk.Push(Value{nil, objptr{}, b.readObject()})
+	case "ID":
+		skipInlineImage(b)
+		do(stk, "EI")
+	default:
+		if execPS(string(kw), stk, dicts) {
+			return false
+		}
+		if lookupInDicts(kw, stk, *dicts) {
+			return true
+		}
+		do(stk, string(kw))
+	}
+	return false
+}
+
 // Interpret interprets the content in a stream as a basic PostScript program,
 // pushing values onto a stack and then calling the do function to execute
 // operators. The do function may push or pop values from the stack as needed
@@ -56,101 +221,19 @@ func newDict() Value {
 func Interpret(strm Value, do func(stk *Stack, op string)) {
 	var stk Stack
 	var dicts []dict
-	s := strm
-	strmlen := 1
-	if strm.Kind() == Array {
-		strmlen = strm.Len()
-	}
+	b := openInterpBuffer(strm)
 
-	for i := 0; i < strmlen; i++ {
-		if strm.Kind() == Array {
-			s = strm.Index(i)
+	for {
+		tok := b.readToken()
+		if tok == io.EOF {
+			break
 		}
-
-		rd := s.Reader()
-
-		b := newBuffer(rd, 0)
-		b.allowEOF = true
-		b.allowObjptr = false
-		b.allowStream = false
-
-	Reading:
-		for {
-			tok := b.readToken()
-			if tok == io.EOF {
-				break
-			}
-			if kw, ok := tok.(keyword); ok {
-				switch kw {
-				case "null", "[", "]", "<<", ">>":
-					break
-				default:
-					for i := len(dicts) - 1; i >= 0; i-- {
-						if v, ok := dicts[i][name(kw)]; ok {
-							stk.Push(Value{nil, objptr{}, v})
-							continue Reading
-						}
-					}
-					do(&stk, string(kw))
-					continue
-				case "dict":
-					stk.Pop()
-					stk.Push(Value{nil, objptr{}, make(dict)})
-					continue
-				case "currentdict":
-					if len(dicts) == 0 {
-						panic("no current dictionary")
-					}
-					stk.Push(Value{nil, objptr{}, dicts[len(dicts)-1]})
-					continue
-				case "begin":
-					d := stk.Pop()
-					if d.Kind() != Dict {
-						panic("cannot begin non-dict")
-					}
-					dicts = append(dicts, d.data.(dict))
-					continue
-				case "end":
-					if len(dicts) <= 0 {
-						panic("mismatched begin/end")
-					}
-					dicts = dicts[:len(dicts)-1]
-					continue
-				case "def":
-					if len(dicts) <= 0 {
-						panic("def without open dict")
-					}
-					val := stk.Pop()
-					key, ok := stk.Pop().data.(name)
-					if !ok {
-						// panic(fmt.Sprintf("def of non-name: %+v", stk.Pop().data))
-						// Skip the value if it has key without value
-						continue
-					}
-					dicts[len(dicts)-1][key] = val.data
-					continue
-				case "pop":
-					stk.Pop()
-					continue
-				}
-			}
+		kw, ok := tok.(keyword)
+		if !ok {
 			b.unreadToken(tok)
-			obj := b.readObject()
-			stk.Push(Value{nil, objptr{}, obj})
+			stk.Push(Value{nil, objptr{}, b.readObject()})
+			continue
 		}
+		dispatchKeyword(kw, &stk, &dicts, b, do)
 	}
-}
-
-type seqReader struct {
-	rd     io.Reader
-	offset int64
-}
-
-func (r *seqReader) ReadAt(buf []byte, offset int64) (int, error) {
-	if offset != r.offset {
-		return 0, fmt.Errorf("non-sequential read of stream")
-	}
-	n, err := io.ReadFull(r.rd, buf)
-	r.offset += int64(n)
-	return n, err
 }

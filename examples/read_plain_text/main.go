@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/Detective-XH/pdf"
 )
 
 func main() {
@@ -17,7 +18,7 @@ func main() {
 	defer f.Close()
 
 	var buf bytes.Buffer
-	b, err := r.GetPlainText()
+	b, err := r.GetPlainText(context.Background())
 	if err != nil {
 		panic(err)
 	}

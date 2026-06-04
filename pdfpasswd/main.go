@@ -12,7 +12,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/Detective-XH/pdf"
 )
 
 var (

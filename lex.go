@@ -20,7 +20,7 @@ import (
 //	string, a PDF string literal
 //	keyword, a PDF keyword
 //	name, a PDF name without the leading slash
-type token interface{}
+type token any
 
 // A name is a PDF name, without the leading slash.
 type name string
@@ -45,6 +45,7 @@ type buffer struct {
 	key         []byte
 	useAES      bool
 	objptr      objptr
+	depth       int
 }
 
 // newBuffer returns a new buffer reading from r at the given offset.
@@ -56,13 +57,6 @@ func newBuffer(r io.Reader, offset int64) *buffer {
 		allowObjptr: true,
 		allowStream: true,
 	}
-}
-
-func (b *buffer) seek(offset int64) {
-	b.offset = offset
-	b.buf = b.buf[:0]
-	b.pos = 0
-	b.unread = b.unread[:0]
 }
 
 func (b *buffer) readByte() byte {
@@ -77,7 +71,7 @@ func (b *buffer) readByte() byte {
 	return c
 }
 
-func (b *buffer) errorf(format string, args ...interface{}) {
+func (b *buffer) errorf(format string, args ...any) {
 	panic(fmt.Errorf(format, args...))
 }
 
@@ -123,19 +117,15 @@ func (b *buffer) unreadToken(t token) {
 	b.unread = append(b.unread, t)
 }
 
-func (b *buffer) readToken() token {
-	if n := len(b.unread); n > 0 {
-		t := b.unread[n-1]
-		b.unread = b.unread[:n-1]
-		return t
-	}
-
-	// Find first non-space, non-comment byte.
+// skipSpaceAndComments advances past whitespace and % comments, returning
+// the first non-whitespace byte and a bool that is true if EOF was reached
+// during whitespace (the caller should return io.EOF in that case).
+func (b *buffer) skipSpaceAndComments() (byte, bool) {
 	c := b.readByte()
 	for {
 		if isSpace(c) {
 			if b.eof {
-				return io.EOF
+				return 0, true
 			}
 			c = b.readByte()
 		} else if c == '%' {
@@ -146,56 +136,97 @@ func (b *buffer) readToken() token {
 			break
 		}
 	}
+	return c, false
+}
+
+// readAngleBracket dispatches '<' or '>' to the appropriate handler.
+func (b *buffer) readAngleBracket(c byte) token {
+	if c == '<' {
+		return b.readAngleBracketOpen()
+	}
+	return b.readAngleBracketClose()
+}
+
+// readAngleBracketOpen handles the '<' case: '<<' becomes the dict-open
+// keyword; anything else is a hex string.
+func (b *buffer) readAngleBracketOpen() token {
+	if b.readByte() == '<' {
+		return keyword("<<")
+	}
+	b.unreadByte()
+	return b.readHexString()
+}
+
+// readAngleBracketClose handles the '>' case: '>>' becomes the dict-close keyword.
+func (b *buffer) readAngleBracketClose() token {
+	if b.readByte() == '>' {
+		return keyword(">>")
+	}
+	b.unreadByte()
+	b.errorf("unexpected delimiter %#q", rune('>'))
+	return nil
+}
+
+func (b *buffer) readToken() token {
+	if n := len(b.unread); n > 0 {
+		t := b.unread[n-1]
+		b.unread = b.unread[:n-1]
+		return t
+	}
+
+	c, eof := b.skipSpaceAndComments()
+	if eof {
+		return io.EOF
+	}
 
 	switch c {
-	case '<':
-		if b.readByte() == '<' {
-			return keyword("<<")
-		}
-		b.unreadByte()
-		return b.readHexString()
-
+	case '<', '>':
+		return b.readAngleBracket(c)
 	case '(':
 		return b.readLiteralString()
-
 	case '[', ']', '{', '}':
 		return keyword(string(c))
-
 	case '/':
 		return b.readName()
-
-	case '>':
-		if b.readByte() == '>' {
-			return keyword(">>")
-		}
-		b.unreadByte()
-		fallthrough
-
 	default:
-		if isDelim(c) {
-			b.errorf("unexpected delimiter %#q", rune(c))
-			return nil
+		return b.readTokenDefault(c)
+	}
+}
+
+func (b *buffer) readTokenDefault(c byte) token {
+	if isDelim(c) {
+		b.errorf("unexpected delimiter %#q", rune(c))
+		return nil
+	}
+	b.unreadByte()
+	return b.readKeyword()
+}
+
+// readHexNibble reads the next non-space byte from b that forms part of a hex
+// string, skipping whitespace. It returns the byte and true, or 0 and false if
+// EOF was reached before a non-space byte was found.
+func (b *buffer) readHexNibble() (byte, bool) {
+	for {
+		c := b.readByte()
+		if b.eof {
+			return 0, false
 		}
-		b.unreadByte()
-		return b.readKeyword()
+		if !isSpace(c) {
+			return c, true
+		}
 	}
 }
 
 func (b *buffer) readHexString() token {
 	tmp := b.tmp[:0]
 	for {
-	Loop:
-		c := b.readByte()
-		if c == '>' {
+		c, ok := b.readHexNibble()
+		if !ok || c == '>' {
 			break
 		}
-		if isSpace(c) {
-			goto Loop
-		}
-	Loop2:
-		c2 := b.readByte()
-		if isSpace(c2) {
-			goto Loop2
+		c2, ok := b.readHexNibble()
+		if !ok {
+			break
 		}
 		x := unhex(c)<<4 | unhex(c2)
 		if x < 0 {
@@ -220,6 +251,63 @@ func unhex(b byte) int {
 	return -1
 }
 
+// namedEscapeByte maps a single-character escape letter to its decoded byte.
+// Returns the decoded byte and true if the escape is a recognised named escape.
+var namedEscapeByte = map[byte]byte{
+	'n': '\n',
+	'r': '\r',
+	'b': '\b',
+	't': '\t',
+	'f': '\f',
+}
+
+// appendEscape decodes the backslash-escape sequence whose character after
+// the backslash is c, appends the decoded bytes to tmp, and returns the
+// grown slice. The leading backslash has already been consumed by the caller.
+func (b *buffer) appendEscape(tmp []byte, c byte) []byte {
+	if decoded, ok := namedEscapeByte[c]; ok {
+		return append(tmp, decoded)
+	}
+	switch c {
+	case '(', ')', '\\':
+		return append(tmp, c)
+	case '\r', '\n':
+		return b.skipLineContinuation(tmp, c)
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		return b.appendOctalEscape(tmp, c)
+	default:
+		b.errorf("invalid escape sequence \\%c", c)
+		return append(tmp, '\\', c)
+	}
+}
+
+// skipLineContinuation handles a backslash-newline line continuation.
+// For \r, a following \n is consumed as part of the CRLF pair.
+func (b *buffer) skipLineContinuation(tmp []byte, c byte) []byte {
+	if c == '\r' && b.readByte() != '\n' {
+		b.unreadByte()
+	}
+	return tmp
+}
+
+// appendOctalEscape decodes a PDF octal escape \ddd (1–3 octal digits).
+// first is the digit already consumed; up to two more are read from b.
+func (b *buffer) appendOctalEscape(tmp []byte, first byte) []byte {
+	x := int(first - '0')
+	for range 2 {
+		c := b.readByte()
+		if c < '0' || c > '7' {
+			b.unreadByte()
+			break
+		}
+		x = x*8 + int(c-'0')
+	}
+	if x > 255 {
+		b.errorf("invalid octal escape \\%03o", x)
+	}
+	return append(tmp, byte(x))
+}
+
 func (b *buffer) readLiteralString() token {
 	tmp := b.tmp[:0]
 	depth := 1
@@ -227,8 +315,6 @@ Loop:
 	for !b.eof {
 		c := b.readByte()
 		switch c {
-		default:
-			tmp = append(tmp, c)
 		case '(':
 			depth++
 			tmp = append(tmp, c)
@@ -238,44 +324,9 @@ Loop:
 			}
 			tmp = append(tmp, c)
 		case '\\':
-			switch c = b.readByte(); c {
-			default:
-				b.errorf("invalid escape sequence \\%c", c)
-				tmp = append(tmp, '\\', c)
-			case 'n':
-				tmp = append(tmp, '\n')
-			case 'r':
-				tmp = append(tmp, '\r')
-			case 'b':
-				tmp = append(tmp, '\b')
-			case 't':
-				tmp = append(tmp, '\t')
-			case 'f':
-				tmp = append(tmp, '\f')
-			case '(', ')', '\\':
-				tmp = append(tmp, c)
-			case '\r':
-				if b.readByte() != '\n' {
-					b.unreadByte()
-				}
-				fallthrough
-			case '\n':
-				// no append
-			case '0', '1', '2', '3', '4', '5', '6', '7':
-				x := int(c - '0')
-				for i := 0; i < 2; i++ {
-					c = b.readByte()
-					if c < '0' || c > '7' {
-						b.unreadByte()
-						break
-					}
-					x = x*8 + int(c-'0')
-				}
-				if x > 255 {
-					b.errorf("invalid octal escape \\%03o", x)
-				}
-				tmp = append(tmp, byte(x))
-			}
+			tmp = b.appendEscape(tmp, b.readByte())
+		default:
+			tmp = append(tmp, c)
 		}
 	}
 	b.tmp = tmp
@@ -316,31 +367,45 @@ func (b *buffer) readKeyword() token {
 	}
 	b.tmp = tmp
 	s := string(tmp)
-	switch {
-	case s == "true":
+	switch s {
+	case "true":
 		return true
-	case s == "false":
+	case "false":
 		return false
-	case isInteger(s):
+	}
+	if t, ok := b.parseNumericToken(s); ok {
+		return t
+	}
+	return keyword(s)
+}
+
+func (b *buffer) parseNumericToken(s string) (token, bool) {
+	if isInteger(s) {
 		x, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
 			b.errorf("invalid integer %s", s)
 		}
-		return x
-	case isReal(s):
+		return x, true
+	}
+	if isReal(s) {
 		x, err := strconv.ParseFloat(s, 64)
 		if err != nil {
 			b.errorf("invalid real %s", s)
 		}
-		return x
+		return x, true
 	}
-	return keyword(string(tmp))
+	return nil, false
+}
+
+func stripSign(s string) string {
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		return s[1:]
+	}
+	return s
 }
 
 func isInteger(s string) bool {
-	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
-		s = s[1:]
-	}
+	s = stripSign(s)
 	if len(s) == 0 {
 		return false
 	}
@@ -353,9 +418,7 @@ func isInteger(s string) bool {
 }
 
 func isReal(s string) bool {
-	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
-		s = s[1:]
-	}
+	s = stripSign(s)
 	if len(s) == 0 {
 		return false
 	}
@@ -370,153 +433,6 @@ func isReal(s string) bool {
 		}
 	}
 	return ndot == 1
-}
-
-// An object is a PDF syntax object, one of the following Go types:
-//
-//	bool, a PDF boolean
-//	int64, a PDF integer
-//	float64, a PDF real
-//	string, a PDF string literal
-//	name, a PDF name without the leading slash
-//	dict, a PDF dictionary
-//	array, a PDF array
-//	stream, a PDF stream
-//	objptr, a PDF object reference
-//	objdef, a PDF object definition
-//
-// An object may also be nil, to represent the PDF null.
-type object interface{}
-
-type dict map[name]object
-
-type array []object
-
-type stream struct {
-	hdr    dict
-	ptr    objptr
-	offset int64
-}
-
-type objptr struct {
-	id  uint32
-	gen uint16
-}
-
-type objdef struct {
-	ptr objptr
-	obj object
-}
-
-func (b *buffer) readObject() object {
-	tok := b.readToken()
-	if kw, ok := tok.(keyword); ok {
-		switch kw {
-		case "null":
-			return nil
-		case "<<":
-			return b.readDict()
-		case "[":
-			return b.readArray()
-		case ">>":
-			// stop the object
-			return nil
-		}
-		b.errorf("unexpected keyword %q parsing object", kw)
-		return nil
-	}
-
-	if str, ok := tok.(string); ok && b.key != nil && b.objptr.id != 0 {
-		tok = decryptString(b.key, b.useAES, b.objptr, str)
-	}
-
-	if !b.allowObjptr {
-		return tok
-	}
-
-	if t1, ok := tok.(int64); ok && int64(uint32(t1)) == t1 {
-		tok2 := b.readToken()
-		if t2, ok := tok2.(int64); ok && int64(uint16(t2)) == t2 {
-			tok3 := b.readToken()
-			switch tok3 {
-			case keyword("R"):
-				return objptr{uint32(t1), uint16(t2)}
-			case keyword("obj"):
-				old := b.objptr
-				b.objptr = objptr{uint32(t1), uint16(t2)}
-				obj := b.readObject()
-				if _, ok := obj.(stream); !ok {
-					tok4 := b.readToken()
-					if tok4 != keyword("endobj") {
-						b.errorf("missing endobj after indirect object definition")
-						b.unreadToken(tok4)
-					}
-				}
-				b.objptr = old
-				return objdef{objptr{uint32(t1), uint16(t2)}, obj}
-			}
-			b.unreadToken(tok3)
-		}
-		b.unreadToken(tok2)
-	}
-	return tok
-}
-
-func (b *buffer) readArray() object {
-	var x array
-	for {
-		tok := b.readToken()
-		if tok == nil || tok == keyword("]") {
-			break
-		}
-		b.unreadToken(tok)
-		x = append(x, b.readObject())
-	}
-	return x
-}
-
-func (b *buffer) readDict() object {
-	x := make(dict)
-	for {
-		tok := b.readToken()
-		if tok == nil || tok == keyword(">>") {
-			break
-		}
-		if tok == io.EOF {
-			tok = b.readToken()
-			break
-		}
-		n, ok := tok.(name)
-		if !ok {
-			fmt.Printf("DEBUG: %T(%v)\n. Skip dict", tok, tok)
-			b.errorf("unexpected non-name key %T(%v) parsing dictionary", tok, tok)
-			continue
-		}
-		x[n] = b.readObject()
-	}
-
-	if !b.allowStream {
-		return x
-	}
-
-	tok := b.readToken()
-	if tok != keyword("stream") {
-		b.unreadToken(tok)
-		return x
-	}
-
-	switch b.readByte() {
-	case '\r':
-		if b.readByte() != '\n' {
-			b.unreadByte()
-		}
-	case '\n':
-		// ok
-	default:
-		b.errorf("stream keyword not followed by newline")
-	}
-
-	return stream{x, b.objptr, b.readOffset()}
 }
 
 func isSpace(b byte) bool {

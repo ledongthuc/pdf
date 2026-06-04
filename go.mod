@@ -1,3 +1,5 @@
-module github.com/ledongthuc/pdf
+module github.com/Detective-XH/pdf
 
-go 1.24.1
+go 1.25.0
+
+require golang.org/x/text v0.37.0
