@@ -58,11 +58,16 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 }
 
 func followXrefStreamPrevChain(r *Reader, table []xref, size int64, hdr dict) ([]xref, error) {
+	seen := map[int64]bool{}
 	for prevoff := hdr["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if seen[off] {
+			return nil, fmt.Errorf("malformed PDF: cyclic xref /Prev chain at offset %d", off)
+		}
+		seen[off] = true
 		nextTable, nextPrev, err := applyPrevXrefStream(r, off, table, size)
 		if err != nil {
 			return nil, fmt.Errorf("malformed PDF: %v", err)
@@ -104,12 +109,25 @@ func applyPrevXrefStream(r *Reader, absOffset int64, table []xref, maxSize int64
 	return table, prevstrm.hdr["Prev"], nil
 }
 
+const (
+	// maxXrefFieldWidth caps each PDF xref-stream /W field width. The spec
+	// defines /W as the byte widths of the three entry fields (realistically
+	// <= 4); rejecting wider values stops a crafted /W (e.g. [1e9,1e9,1e9])
+	// from sizing the per-row buffer in readXrefStreamData to a multi-gigabyte
+	// allocation. decodeInt accumulates into an int, so a field wider than 8
+	// bytes would overflow regardless.
+	maxXrefFieldWidth = 8
+	// maxXrefRowWidth caps the summed /W row width (the per-row buffer length),
+	// bounding the allocation even for a pathological many-element /W array.
+	maxXrefRowWidth = 1024
+)
+
 // parseWArray validates and converts the PDF xref-stream W array to []int.
 func parseWArray(ww array) ([]int, error) {
-	var w []int
+	w := make([]int, 0, len(ww))
 	for _, x := range ww {
 		i, ok := x.(int64)
-		if !ok || int64(int(i)) != i {
+		if !ok || i < 0 || i > maxXrefFieldWidth {
 			return nil, fmt.Errorf("invalid W array %v", objfmt(ww))
 		}
 		w = append(w, int(i))
@@ -176,6 +194,9 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 	for _, wid := range w {
 		wtotal += wid
 	}
+	if wtotal <= 0 || wtotal > maxXrefRowWidth {
+		return nil, fmt.Errorf("xref stream W row width out of range: %d", wtotal)
+	}
 	buf := make([]byte, wtotal)
 	data := v.Reader()
 	return processXrefIndexPairs(data, buf, w, index, table)
@@ -209,11 +230,16 @@ func decodeInt(b []byte) int {
 }
 
 func followXrefTablePrevChain(r *Reader, table []xref, trailer dict) ([]xref, error) {
+	seen := map[int64]bool{}
 	for prevoff := trailer["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if seen[off] {
+			return nil, fmt.Errorf("malformed PDF: cyclic xref /Prev chain at offset %d", off)
+		}
+		seen[off] = true
 		nextTable, nextPrev, err := applyPrevXrefTable(r, off, table)
 		if err != nil {
 			return nil, fmt.Errorf("malformed PDF: %v", err)

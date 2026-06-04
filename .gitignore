@@ -3,3 +3,9 @@ CLAUDE.md
 .codegraph/
 .claude/
 plans/
+.agents/
+.codex/
+scripts/
+AGENTS.md
+.docgraphignore
+*.out
