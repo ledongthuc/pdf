@@ -185,6 +185,16 @@ func (b *buffer) readHexString() token {
 	tmp := b.tmp[:0]
 	for {
 	Loop:
+		// Once real input is exhausted, readByte() keeps returning a
+		// synthetic '\n' (an implementation detail so other loops can treat
+		// end-of-input as whitespace) rather than ever signaling true EOF.
+		// '\n' is whitespace, so a hex string left unterminated (no closing
+		// ">") made this spin on the isSpace branches forever. Bail out
+		// once b.eof is set instead of retrying.
+		if b.eof {
+			b.errorf("malformed hex string: unterminated at end of input")
+			break
+		}
 		c := b.readByte()
 		if c == '>' {
 			break
@@ -192,9 +202,17 @@ func (b *buffer) readHexString() token {
 		if isSpace(c) {
 			goto Loop
 		}
+		if b.eof {
+			b.errorf("malformed hex string: unterminated at end of input")
+			break
+		}
 	Loop2:
 		c2 := b.readByte()
 		if isSpace(c2) {
+			if b.eof {
+				b.errorf("malformed hex string: unterminated at end of input")
+				break
+			}
 			goto Loop2
 		}
 		x := unhex(c)<<4 | unhex(c2)
