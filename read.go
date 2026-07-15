@@ -237,11 +237,25 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 	}
 
+	// Same class of bug as the object-stream /Extends chain: a malformed or
+	// cyclic /Prev chain (an incremental-update xref stream pointing back to
+	// an offset already visited) makes this loop run forever, allocating a
+	// fresh buffer and re-reading a stream object every pass.
+	visitedPrev := map[int64]bool{}
+	const maxPrevChain = 4096
+	prevHops := 0
 	for prevoff := strm.hdr["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if prevHops++; prevHops > maxPrevChain {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain too long (possible cycle)")
+		}
+		if visitedPrev[off] {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain is cyclic")
+		}
+		visitedPrev[off] = true
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		obj1 := b.readObject()
 		obj, ok := obj1.(objdef)
@@ -367,11 +381,24 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref table not followed by trailer dictionary")
 	}
 
+	// Same /Prev-chain cycle risk as readXrefStream below: an incremental
+	// update's classic (non-stream) xref table can point back to an offset
+	// already visited, looping forever.
+	visitedPrev := map[int64]bool{}
+	const maxPrevChain = 4096
+	prevHops := 0
 	for prevoff := trailer["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if prevHops++; prevHops > maxPrevChain {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain too long (possible cycle)")
+		}
+		if visitedPrev[off] {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain is cyclic")
+		}
+		visitedPrev[off] = true
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		tok := b.readToken()
 		if tok != keyword("xref") {
