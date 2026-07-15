@@ -466,7 +466,14 @@ func (b *buffer) readArray() object {
 	var x array
 	for {
 		tok := b.readToken()
-		if tok == nil || tok == keyword("]") {
+		// A truncated/malformed array (missing closing "]" before the data
+		// ends) makes readToken keep returning io.EOF forever once b.eof is
+		// set. Without this check the loop below never terminates: it
+		// re-enters readObject, which returns the io.EOF sentinel as if it
+		// were an array element, and x = append(x, ...) grows without bound
+		// until the process is OOM-killed. readDict already guards against
+		// this same condition; readArray did not.
+		if tok == nil || tok == keyword("]") || tok == io.EOF {
 			break
 		}
 		b.unreadToken(tok)
