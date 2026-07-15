@@ -728,11 +728,30 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 		var obj object
 		if xref.inStream {
 			strm := r.resolve(parent, xref.stream)
+			// A malformed or maliciously crafted PDF can make the /Extends
+			// chain of object streams cyclic (a stream's /Extends pointing
+			// back to a stream already visited). Without a guard, the loop
+			// below never terminates: each pass re-decompresses the whole
+			// stream via strm.Reader(), so it also never stops allocating.
+			// That combination hangs the process and grows memory until the
+			// OS kills it. Track visited stream object numbers and cap the
+			// chain length so a cycle (or a pathologically long chain) fails
+			// fast with a panic instead of hanging - callers of this package
+			// already recover() around resolution.
+			visited := map[objptr]bool{}
+			const maxExtendsChain = 1024
 		Search:
-			for {
+			for hops := 0; ; hops++ {
+				if hops > maxExtendsChain {
+					panic("object stream /Extends chain too long (possible cycle)")
+				}
 				if strm.Kind() != Stream {
 					panic("not a stream")
 				}
+				if visited[strm.ptr] {
+					panic("object stream /Extends chain is cyclic")
+				}
+				visited[strm.ptr] = true
 				if strm.Key("Type").Name() != "ObjStm" {
 					panic("not an object stream")
 				}
