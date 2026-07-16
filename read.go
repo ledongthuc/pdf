@@ -230,6 +230,19 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream missing Size")
 	}
+	// /Size is an untrusted value read straight from the PDF. Unlike the
+	// loop-based bugs fixed elsewhere in this fork, a bogus huge Size (e.g.
+	// 500 million) doesn't need a cycle or truncated input - make([]xref,
+	// size) below would immediately attempt a single huge allocation (each
+	// xref entry is >8 bytes, so that example alone is ~4GB+ in one call),
+	// which can hit a Go runtime fatal "out of memory" error that recover()
+	// cannot catch. No valid PDF can have more xref entries than there are
+	// bytes in the file (every real object needs at least a few bytes to be
+	// written out), so bounding Size against the file's total byte size
+	// rejects the bogus case with zero risk of false-rejecting a real one.
+	if size < 0 || size > r.end {
+		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream Size %d exceeds file size %d bytes", size, r.end)
+	}
 	table := make([]xref, size)
 
 	table, err := readXrefStreamData(r, strm, table, size)
