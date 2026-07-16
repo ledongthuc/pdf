@@ -25,8 +25,17 @@ type Page struct {
 func (r *Reader) Page(num int) Page {
 	num-- // now 0-indexed
 	page := r.Trailer().Key("Root").Key("Pages")
+	// A malformed /Pages tree can be cyclic (a Kids entry pointing back to an
+	// ancestor), which would otherwise make this loop descend forever - the
+	// same failure mode as the object-stream /Extends and xref /Prev chains
+	// fixed elsewhere in this fork.
+	visited := map[objptr]bool{}
 Search:
 	for page.Key("Type").Name() == "Pages" {
+		if visited[page.ptr] {
+			return Page{}
+		}
+		visited[page.ptr] = true
 		count := int(page.Key("Count").Int64())
 		if count < num {
 			return Page{}
@@ -1090,14 +1099,25 @@ type Outline struct {
 // The Outline returned is the root of the outline tree and typically has no Title itself.
 // That is, the children of the returned root are the top-level entries in the outline.
 func (r *Reader) Outline() Outline {
-	return buildOutline(r.Trailer().Key("Root").Key("Outlines"))
+	return buildOutline(r.Trailer().Key("Root").Key("Outlines"), map[objptr]bool{})
 }
 
-func buildOutline(entry Value) Outline {
+// buildOutline walks the /First,/Next sibling-and-child bookmark list. A
+// malformed outline can make that list cyclic (or a child point back into
+// its own ancestor chain), which would otherwise recurse/loop forever - the
+// same class of bug fixed for the /Pages tree, the object-stream /Extends
+// chain, and the xref /Prev chain elsewhere in this fork. visited is keyed
+// by each entry's underlying object number so a repeat is caught regardless
+// of whether it shows up as a "sibling" or as a "child".
+func buildOutline(entry Value, visited map[objptr]bool) Outline {
 	var x Outline
 	x.Title = entry.Key("Title").Text()
 	for child := entry.Key("First"); child.Kind() == Dict; child = child.Key("Next") {
-		x.Child = append(x.Child, buildOutline(child))
+		if visited[child.ptr] {
+			break
+		}
+		visited[child.ptr] = true
+		x.Child = append(x.Child, buildOutline(child, visited))
 	}
 	return x
 }

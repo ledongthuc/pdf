@@ -230,6 +230,19 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream missing Size")
 	}
+	// /Size is an untrusted value read straight from the PDF. Unlike the
+	// loop-based bugs fixed elsewhere in this fork, a bogus huge Size (e.g.
+	// 500 million) doesn't need a cycle or truncated input - make([]xref,
+	// size) below would immediately attempt a single huge allocation (each
+	// xref entry is >8 bytes, so that example alone is ~4GB+ in one call),
+	// which can hit a Go runtime fatal "out of memory" error that recover()
+	// cannot catch. No valid PDF can have more xref entries than there are
+	// bytes in the file (every real object needs at least a few bytes to be
+	// written out), so bounding Size against the file's total byte size
+	// rejects the bogus case with zero risk of false-rejecting a real one.
+	if size < 0 || size > r.end {
+		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream Size %d exceeds file size %d bytes", size, r.end)
+	}
 	table := make([]xref, size)
 
 	table, err := readXrefStreamData(r, strm, table, size)
@@ -237,11 +250,25 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 	}
 
+	// Same class of bug as the object-stream /Extends chain: a malformed or
+	// cyclic /Prev chain (an incremental-update xref stream pointing back to
+	// an offset already visited) makes this loop run forever, allocating a
+	// fresh buffer and re-reading a stream object every pass.
+	visitedPrev := map[int64]bool{}
+	const maxPrevChain = 4096
+	prevHops := 0
 	for prevoff := strm.hdr["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if prevHops++; prevHops > maxPrevChain {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain too long (possible cycle)")
+		}
+		if visitedPrev[off] {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain is cyclic")
+		}
+		visitedPrev[off] = true
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		obj1 := b.readObject()
 		obj, ok := obj1.(objdef)
@@ -367,11 +394,24 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref table not followed by trailer dictionary")
 	}
 
+	// Same /Prev-chain cycle risk as readXrefStream below: an incremental
+	// update's classic (non-stream) xref table can point back to an offset
+	// already visited, looping forever.
+	visitedPrev := map[int64]bool{}
+	const maxPrevChain = 4096
+	prevHops := 0
 	for prevoff := trailer["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if prevHops++; prevHops > maxPrevChain {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain too long (possible cycle)")
+		}
+		if visitedPrev[off] {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref /Prev chain is cyclic")
+		}
+		visitedPrev[off] = true
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		tok := b.readToken()
 		if tok != keyword("xref") {
@@ -728,11 +768,30 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 		var obj object
 		if xref.inStream {
 			strm := r.resolve(parent, xref.stream)
+			// A malformed or maliciously crafted PDF can make the /Extends
+			// chain of object streams cyclic (a stream's /Extends pointing
+			// back to a stream already visited). Without a guard, the loop
+			// below never terminates: each pass re-decompresses the whole
+			// stream via strm.Reader(), so it also never stops allocating.
+			// That combination hangs the process and grows memory until the
+			// OS kills it. Track visited stream object numbers and cap the
+			// chain length so a cycle (or a pathologically long chain) fails
+			// fast with a panic instead of hanging - callers of this package
+			// already recover() around resolution.
+			visited := map[objptr]bool{}
+			const maxExtendsChain = 1024
 		Search:
-			for {
+			for hops := 0; ; hops++ {
+				if hops > maxExtendsChain {
+					panic("object stream /Extends chain too long (possible cycle)")
+				}
 				if strm.Kind() != Stream {
 					panic("not a stream")
 				}
+				if visited[strm.ptr] {
+					panic("object stream /Extends chain is cyclic")
+				}
+				visited[strm.ptr] = true
 				if strm.Key("Type").Name() != "ObjStm" {
 					panic("not an object stream")
 				}
