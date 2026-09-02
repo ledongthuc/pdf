@@ -56,88 +56,85 @@ func newDict() Value {
 func Interpret(strm Value, do func(stk *Stack, op string)) {
 	var stk Stack
 	var dicts []dict
-	s := strm
-	strmlen := 1
+	var rd io.Reader
 	if strm.Kind() == Array {
-		strmlen = strm.Len()
+		readers := make([]io.Reader, 0, strm.Len())
+		for i := 0; i < strm.Len(); i++ {
+			readers = append(readers, strm.Index(i).Reader())
+		}
+		rd = io.MultiReader(readers...)
+	} else {
+		rd = strm.Reader()
 	}
 
-	for i := 0; i < strmlen; i++ {
-		if strm.Kind() == Array {
-			s = strm.Index(i)
+	b := newBuffer(rd, 0)
+	b.allowEOF = true
+	b.allowObjptr = false
+	b.allowStream = false
+
+Reading:
+	for {
+		tok := b.readToken()
+		if tok == io.EOF {
+			break
 		}
-
-		rd := s.Reader()
-
-		b := newBuffer(rd, 0)
-		b.allowEOF = true
-		b.allowObjptr = false
-		b.allowStream = false
-
-	Reading:
-		for {
-			tok := b.readToken()
-			if tok == io.EOF {
+		if kw, ok := tok.(keyword); ok {
+			switch kw {
+			case "null", "[", "]", "<<", ">>":
 				break
-			}
-			if kw, ok := tok.(keyword); ok {
-				switch kw {
-				case "null", "[", "]", "<<", ">>":
-					break
-				default:
-					for i := len(dicts) - 1; i >= 0; i-- {
-						if v, ok := dicts[i][name(kw)]; ok {
-							stk.Push(Value{nil, objptr{}, v})
-							continue Reading
-						}
+			default:
+				for i := len(dicts) - 1; i >= 0; i-- {
+					if v, ok := dicts[i][name(kw)]; ok {
+						stk.Push(Value{nil, objptr{}, v})
+						continue Reading
 					}
-					do(&stk, string(kw))
-					continue
-				case "dict":
-					stk.Pop()
-					stk.Push(Value{nil, objptr{}, make(dict)})
-					continue
-				case "currentdict":
-					if len(dicts) == 0 {
-						panic("no current dictionary")
-					}
-					stk.Push(Value{nil, objptr{}, dicts[len(dicts)-1]})
-					continue
-				case "begin":
-					d := stk.Pop()
-					if d.Kind() != Dict {
-						panic("cannot begin non-dict")
-					}
-					dicts = append(dicts, d.data.(dict))
-					continue
-				case "end":
-					if len(dicts) <= 0 {
-						panic("mismatched begin/end")
-					}
-					dicts = dicts[:len(dicts)-1]
-					continue
-				case "def":
-					if len(dicts) <= 0 {
-						panic("def without open dict")
-					}
-					val := stk.Pop()
-					key, ok := stk.Pop().data.(name)
-					if !ok {
-						// panic(fmt.Sprintf("def of non-name: %+v", stk.Pop().data))
-						// Skip the value if it has key without value
-						continue
-					}
-					dicts[len(dicts)-1][key] = val.data
-					continue
-				case "pop":
-					stk.Pop()
+				}
+				do(&stk, string(kw))
+				continue
+			case "dict":
+				stk.Pop()
+				stk.Push(Value{nil, objptr{}, make(dict)})
+				continue
+			case "currentdict":
+				if len(dicts) == 0 {
+					panic("no current dictionary")
+				}
+				stk.Push(Value{nil, objptr{}, dicts[len(dicts)-1]})
+				continue
+			case "begin":
+				d := stk.Pop()
+				if d.Kind() != Dict {
+					panic("cannot begin non-dict")
+				}
+				dicts = append(dicts, d.data.(dict))
+				continue
+			case "end":
+				if len(dicts) <= 0 {
+					panic("mismatched begin/end")
+				}
+				dicts = dicts[:len(dicts)-1]
+				continue
+			case "def":
+				if len(dicts) <= 0 {
+					panic("def without open dict")
+				}
+				val := stk.Pop()
+				key, ok := stk.Pop().data.(name)
+				if !ok {
+					// panic(fmt.Sprintf("def of non-name: %+v", stk.Pop().data))
+					// Skip the value if it has key without value
 					continue
 				}
+				dicts[len(dicts)-1][key] = val.data
+				continue
+			case "pop":
+				stk.Pop()
+				continue
 			}
-			b.unreadToken(tok)
-			obj := b.readObject()
-			stk.Push(Value{nil, objptr{}, obj})
 		}
+		b.unreadToken(tok)
+		obj := b.readObject()
+		stk.Push(Value{nil, objptr{}, obj})
 	}
 }
 
