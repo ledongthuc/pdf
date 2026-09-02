@@ -10,44 +10,33 @@ import (
 
 type alphaReader struct {
 	reader io.Reader
+	eod    bool
 }
 
 func newAlphaReader(reader io.Reader) *alphaReader {
 	return &alphaReader{reader: reader}
 }
 
-func checkASCII85(r byte) byte {
-	if r >= '!' && r <= 'u' { // 33 <= ascii85 <=117
-		return r
-	}
-	if r == '~' {
-		return 1 // for marking possible end of data
-	}
-	return 0 // if non-ascii85
+func isASCII85(r byte) bool {
+	return (r >= '!' && r <= 'u') || r == 'z'
 }
 
 func (a *alphaReader) Read(p []byte) (int, error) {
+	if a.eod {
+		return 0, io.EOF
+	}
 	n, err := a.reader.Read(p)
-	if err == io.EOF {
-	}
-	if err != nil {
-		return n, err
-	}
-	buf := make([]byte, n)
-	tilda := false
+	out := 0
 	for i := 0; i < n; i++ {
-		char := checkASCII85(p[i])
-		if char == '>' && tilda { // end of data
-			break
+		c := p[i]
+		if c == '~' {
+			a.eod = true
+			return out, io.EOF
 		}
-		if char > 1 {
-			buf[i] = char
-		}
-		if char == 1 {
-			tilda = true // possible end of data
+		if isASCII85(c) {
+			p[out] = c
+			out++
 		}
 	}
-
-	copy(p, buf)
-	return n, nil
+	return out, err
 }
