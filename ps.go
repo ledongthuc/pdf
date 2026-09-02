@@ -115,10 +115,20 @@ Reading:
 				dicts = dicts[:len(dicts)-1]
 				continue
 			case "def":
-				if len(dicts) <= 0 {
-					panic("def without open dict")
-				}
 				val := stk.Pop()
+				if len(dicts) <= 0 {
+					// A "def" with no dict opened by "begin" is invalid
+					// PostScript, but producers emit it in practice inside a
+					// malformed CMap dictionary LITERAL (e.g.
+					// "<</Registry (x) def/Ordering (y) def>>", where "def"
+					// should not appear between "<<" and ">>" at all). This
+					// package is a limited PostScript subset for embedded
+					// CMap/function data, not a strict validator (see the
+					// doc comment above), so discard the operand and keep
+					// going rather than take the whole Interpret call down
+					// over one producer's malformed dict.
+					continue
+				}
 				key, ok := stk.Pop().data.(name)
 				if !ok {
 					// panic(fmt.Sprintf("def of non-name: %+v", stk.Pop().data))
@@ -133,9 +143,34 @@ Reading:
 			}
 		}
 		b.unreadToken(tok)
-		obj := b.readObject()
+		obj, ok := readObjectRecover(b)
+		if !ok {
+			continue
+		}
 		stk.Push(Value{nil, objptr{}, obj})
 	}
+}
+
+// readObjectRecover reads one object, recovering a panic from malformed
+// input rather than letting it escape Interpret.
+//
+// Interpret parses an embedded PostScript-SUBSET stream (a CMap, a function)
+// that is not always a well-formed PDF object graph — for example, a
+// producer's CMap embedding "def" tokens inside what should be a plain
+// dictionary literal, which readObject (correctly, for a real PDF object)
+// treats as a hard parse error. Letting that escape takes the WHOLE calling
+// operation down — e.g. reading a font's /ToUnicode CMap — over one
+// unparseable operand, even when the caller (readCmap) only needs the
+// recognized cmap operators and the rest of the stream is fine. ok=false
+// means the operand is discarded; the Reading loop continues from wherever
+// the underlying buffer's position landed.
+func readObjectRecover(b *buffer) (obj object, ok bool) {
+	defer func() {
+		if recover() != nil {
+			obj, ok = nil, false
+		}
+	}()
+	return b.readObject(), true
 }
 
 type seqReader struct {
