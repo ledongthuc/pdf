@@ -13,6 +13,25 @@ import (
 	"strings"
 )
 
+// The structures a PDF uses to describe pages and outlines are graphs of
+// object references, not trees, so a file can point them back at themselves.
+// The traversals below are bounded to stop a cycle from looping forever, or
+// from recursing until the goroutine stack is exhausted, which is a fatal
+// error that a caller cannot recover from.
+const (
+	// maxInheritDepth bounds a walk up a chain of /Parent links.
+	maxInheritDepth = 64
+
+	// maxPageTreeDepth bounds a descent through /Kids. Real page trees are
+	// broad and shallow.
+	maxPageTreeDepth = 1024
+
+	// maxOutlineDepth and maxOutlineSiblings bound the outline tree, whose
+	// /First and /Next links can both be made cyclic.
+	maxOutlineDepth    = 128
+	maxOutlineSiblings = 1 << 16
+)
+
 // A Page represent a single page in a PDF file.
 // The methods interpret a Page dictionary stored in V.
 type Page struct {
@@ -25,8 +44,14 @@ type Page struct {
 func (r *Reader) Page(num int) Page {
 	num-- // now 0-indexed
 	page := r.Trailer().Key("Root").Key("Pages")
+	depth := 0
 Search:
 	for page.Key("Type").Name() == "Pages" {
+		// Each continue Search below descends one level, so a /Kids link back
+		// up the tree would otherwise loop forever.
+		if depth++; depth > maxPageTreeDepth {
+			return Page{}
+		}
 		count := int(page.Key("Count").Int64())
 		if count < num {
 			return Page{}
@@ -62,6 +87,14 @@ func (r *Reader) NumPage() int {
 
 // GetPlainText returns all the text in the PDF file
 func (r *Reader) GetPlainText() (reader io.Reader, err error) {
+	// Resolving objects panics on malformed input, and that happens here in
+	// NumPage, Page and Fonts as well as inside Page.GetPlainText.
+	defer func() {
+		if e := recover(); e != nil {
+			reader, err = &bytes.Buffer{}, fmt.Errorf("malformed PDF: %v", e)
+		}
+	}()
+
 	pages := r.NumPage()
 	var buf bytes.Buffer
 	fonts := make(map[string]*Font)
@@ -84,6 +117,14 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 
 // GetStyledTexts returns list all sentences in an array, that are included styles
 func (r *Reader) GetStyledTexts() (sentences []Text, err error) {
+	// Page.Content has no way to report a malformed content stream, so catch
+	// its panics here rather than letting them reach the caller.
+	defer func() {
+		if e := recover(); e != nil {
+			sentences, err = nil, fmt.Errorf("malformed PDF: %v", e)
+		}
+	}()
+
 	totalPage := r.NumPage()
 	for pageIndex := 1; pageIndex <= totalPage; pageIndex++ {
 		p := r.Page(pageIndex)
@@ -115,10 +156,12 @@ func (r *Reader) GetStyledTexts() (sentences []Text, err error) {
 }
 
 func (p Page) findInherited(key string) Value {
-	for v := p.V; !v.IsNull(); v = v.Key("Parent") {
+	v := p.V
+	for depth := 0; !v.IsNull() && depth < maxInheritDepth; depth++ {
 		if r := v.Key(key); !r.IsNull() {
 			return r
 		}
+		v = v.Key("Parent")
 	}
 	return Value{}
 }
@@ -340,7 +383,8 @@ Parse:
 						if len(bfrange.lo) == n && bfrange.lo <= text && text <= bfrange.hi {
 							if bfrange.dst.Kind() == String {
 								s := bfrange.dst.RawString()
-								if bfrange.lo != text { // value isn't at the beginning of the range so scale result
+								// An empty destination has no low byte to scale.
+								if bfrange.lo != text && len(s) > 0 { // value isn't at the beginning of the range so scale result
 									b := []byte(s)
 									b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1] // increment last byte by difference
 									s = string(b)
@@ -382,7 +426,25 @@ Parse:
 	return string(r)
 }
 
-func readCmap(toUnicode Value) *cmap {
+// hasOperands reports whether stk holds enough values for n entries of per
+// entry operands each. The counts in a CMap are declared by the file rather
+// than measured, so an entry count is only credible if the operands to fill it
+// were actually supplied. Without this check a count of a few digits makes the
+// loops below append hundreds of millions of empty entries.
+func hasOperands(stk *Stack, n, per int) bool {
+	return n <= stk.Len()/per
+}
+
+func readCmap(toUnicode Value) (result *cmap) {
+	// A ToUnicode CMap is arbitrary data from the file, and Interpret reports
+	// malformed input by panicking. Treat that as "no usable cmap" so it does
+	// not escape into callers such as Page.Content, which cannot report it.
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+		}
+	}()
+
 	n := -1
 	var m cmap
 	ok := true
@@ -402,9 +464,9 @@ func readCmap(toUnicode Value) *cmap {
 		case "begincodespacerange":
 			n = int(stk.Pop().Int64())
 		case "endcodespacerange":
-			if n < 0 {
+			if n < 0 || !hasOperands(stk, n, 2) {
 				if DebugOn {
-					println("missing begincodespacerange")
+					println("missing or malformed begincodespacerange")
 				}
 				ok = false
 				return
@@ -418,29 +480,48 @@ func readCmap(toUnicode Value) *cmap {
 					ok = false
 					return
 				}
+				// A codespace range is 1 to 4 bytes wide, and its width
+				// indexes m.space directly.
+				if len(lo) > len(m.space) {
+					if DebugOn {
+						println("codespace range too wide")
+					}
+					ok = false
+					return
+				}
 				m.space[len(lo)-1] = append(m.space[len(lo)-1], byteRange{lo, hi})
 			}
 			n = -1
 		case "beginbfchar":
 			n = int(stk.Pop().Int64())
 		case "endbfchar":
-			if n < 0 {
-				panic("missing beginbfchar")
+			if n < 0 || !hasOperands(stk, n, 2) {
+				if DebugOn {
+					println("missing or malformed beginbfchar")
+				}
+				ok = false
+				return
 			}
 			for i := 0; i < n; i++ {
 				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfchar = append(m.bfchar, bfchar{orig, repl})
 			}
+			n = -1
 		case "beginbfrange":
 			n = int(stk.Pop().Int64())
 		case "endbfrange":
-			if n < 0 {
-				panic("missing beginbfrange")
+			if n < 0 || !hasOperands(stk, n, 3) {
+				if DebugOn {
+					println("missing or malformed beginbfrange")
+				}
+				ok = false
+				return
 			}
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
 			}
+			n = -1
 		case "defineresource":
 			stk.Pop().Name() // category
 			value := stk.Pop()
@@ -617,9 +698,11 @@ type Column struct {
 type Columns []*Column
 
 // GetTextByColumn returns the page's all text grouped by column
-func (p Page) GetTextByColumn() (Columns, error) {
-	result := Columns{}
-	var err error
+// The returns are named so that the recover below actually reaches them. With
+// unnamed returns the deferred function only reassigned its own locals, and a
+// panic surfaced as (nil, nil) with the error silently dropped.
+func (p Page) GetTextByColumn() (result Columns, err error) {
+	result = Columns{}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -687,9 +770,9 @@ type Row struct {
 type Rows []*Row
 
 // GetTextByRow returns the page's all text grouped by rows
-func (p Page) GetTextByRow() (Rows, error) {
-	result := Rows{}
-	var err error
+// The returns are named for the same reason as in GetTextByColumn.
+func (p Page) GetTextByRow() (result Rows, err error) {
+	result = Rows{}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -819,6 +902,11 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 		case "Td":
 			walker(enc, currentX, currentY, "")
 		case "Tm":
+			// Only a lower bound, so that a stream leaving extra operands on
+			// the stack keeps behaving as before instead of becoming an error.
+			if len(args) < 6 {
+				panic("bad Tm")
+			}
 			currentX = args[4].Float64()
 			currentY = args[5].Float64()
 		}
@@ -826,6 +914,11 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 }
 
 // Content returns the page's content.
+//
+// Content has no way to report a malformed content stream, so it panics on one.
+// Callers handling untrusted files should either recover, or use GetPlainText,
+// GetStyledTexts, GetTextByRow or GetTextByColumn, which return an error
+// instead.
 func (p Page) Content() Content {
 	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
@@ -919,6 +1012,11 @@ func (p Page) Content() Content {
 
 		case "Q": // restore graphics state
 			n := len(gstack) - 1
+			// A content stream may hold more Q than q, in which case there is
+			// no saved state to pop.
+			if n < 0 {
+				break
+			}
 			g = gstack[n]
 			gstack = gstack[:n]
 
@@ -1090,14 +1188,24 @@ type Outline struct {
 // The Outline returned is the root of the outline tree and typically has no Title itself.
 // That is, the children of the returned root are the top-level entries in the outline.
 func (r *Reader) Outline() Outline {
-	return buildOutline(r.Trailer().Key("Root").Key("Outlines"))
+	return buildOutline(r.Trailer().Key("Root").Key("Outlines"), 0)
 }
 
-func buildOutline(entry Value) Outline {
+func buildOutline(entry Value, depth int) Outline {
 	var x Outline
+	// A /First pointing at its own entry recurses until the stack is gone,
+	// which is fatal rather than recoverable.
+	if depth > maxOutlineDepth {
+		return x
+	}
 	x.Title = entry.Key("Title").Text()
+	n := 0
 	for child := entry.Key("First"); child.Kind() == Dict; child = child.Key("Next") {
-		x.Child = append(x.Child, buildOutline(child))
+		// Likewise a cyclic /Next never reaches a null sibling.
+		if n++; n > maxOutlineSiblings {
+			break
+		}
+		x.Child = append(x.Child, buildOutline(child, depth+1))
 	}
 	return x
 }

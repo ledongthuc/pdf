@@ -101,12 +101,23 @@ func (b *buffer) reload() bool {
 }
 
 func (b *buffer) seekForward(offset int64) {
+	if offset < 0 {
+		b.errorf("malformed PDF: seek to negative offset %d", offset)
+		return
+	}
 	for b.offset < offset {
 		if !b.reload() {
 			return
 		}
 	}
-	b.pos = len(b.buf) - int(b.offset-offset)
+	// offset can name a position before the data still held in buf, which
+	// would leave pos negative and index buf out of bounds on the next read.
+	pos := len(b.buf) - int(b.offset-offset)
+	if pos < 0 || pos > len(b.buf) {
+		b.errorf("malformed PDF: seek to offset %d outside buffer", offset)
+		return
+	}
+	b.pos = pos
 }
 
 func (b *buffer) readOffset() int64 {
@@ -189,11 +200,20 @@ func (b *buffer) readHexString() token {
 		if c == '>' {
 			break
 		}
+		// readByte reports end of input as '\n' once allowEOF is set, so
+		// without this check an unterminated hex string skips whitespace
+		// forever.
+		if b.eof {
+			break
+		}
 		if isSpace(c) {
 			goto Loop
 		}
 	Loop2:
 		c2 := b.readByte()
+		if b.eof {
+			break
+		}
 		if isSpace(c2) {
 			goto Loop2
 		}
