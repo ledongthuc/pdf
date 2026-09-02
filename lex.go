@@ -466,7 +466,12 @@ func (b *buffer) readArray() object {
 	var x array
 	for {
 		tok := b.readToken()
-		if tok == nil || tok == keyword("]") {
+		// Break on io.EOF as well (readToken returns io.EOF as a token value
+		// once the input is exhausted, and readDict already guards for it):
+		// otherwise an array that is never closed, e.g. in a truncated
+		// content stream, loops forever appending io.EOF objects and
+		// allocates memory without bound.
+		if tok == nil || tok == io.EOF || tok == keyword("]") {
 			break
 		}
 		b.unreadToken(tok)
