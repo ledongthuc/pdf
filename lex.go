@@ -432,8 +432,8 @@ func (b *buffer) readObject() object {
 			return b.readDict()
 		case "[":
 			return b.readArray()
-		case ">>":
-			// stop the object
+		case ">>", "]":
+			// stop the object - these mark the end of dict/array
 			return nil
 		}
 		b.errorf("unexpected keyword %q parsing object", kw)
