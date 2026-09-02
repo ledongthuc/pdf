@@ -30,6 +30,12 @@ type name string
 // such as "<<", ">>", "[", "]", "{", "}", are also treated as keywords.
 type keyword string
 
+// maxObjectDepth is the maximum nesting depth for PDF objects (dicts, arrays,
+// and indirect object definitions). Malicious files can nest millions of
+// "N N obj" tokens to exhaust the Go call stack; this limit turns that into
+// a recoverable panic instead of a fatal process crash.
+const maxObjectDepth = 1000
+
 // A buffer holds buffered input bytes from the PDF file.
 type buffer struct {
 	r           io.Reader // source of data
@@ -45,6 +51,7 @@ type buffer struct {
 	key         []byte
 	useAES      bool
 	objptr      objptr
+	depth       int // current object nesting depth
 }
 
 // newBuffer returns a new buffer reading from r at the given offset.
@@ -409,6 +416,13 @@ type objdef struct {
 }
 
 func (b *buffer) readObject() object {
+	b.depth++
+	defer func() { b.depth-- }()
+	if b.depth > maxObjectDepth {
+		b.errorf("object nesting exceeds maximum depth %d", maxObjectDepth)
+		return nil
+	}
+
 	tok := b.readToken()
 	if kw, ok := tok.(keyword); ok {
 		switch kw {
