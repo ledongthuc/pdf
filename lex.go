@@ -30,6 +30,12 @@ type name string
 // such as "<<", ">>", "[", "]", "{", "}", are also treated as keywords.
 type keyword string
 
+// maxObjectDepth is the maximum nesting depth for PDF objects (dicts, arrays,
+// and indirect object definitions). Malicious files can nest millions of
+// "N N obj" tokens to exhaust the Go call stack; this limit turns that into
+// a recoverable panic instead of a fatal process crash.
+const maxObjectDepth = 1000
+
 // A buffer holds buffered input bytes from the PDF file.
 type buffer struct {
 	r           io.Reader // source of data
@@ -45,6 +51,7 @@ type buffer struct {
 	key         []byte
 	useAES      bool
 	objptr      objptr
+	depth       int // current object nesting depth
 }
 
 // newBuffer returns a new buffer reading from r at the given offset.
@@ -409,6 +416,13 @@ type objdef struct {
 }
 
 func (b *buffer) readObject() object {
+	b.depth++
+	defer func() { b.depth-- }()
+	if b.depth > maxObjectDepth {
+		b.errorf("object nesting exceeds maximum depth %d", maxObjectDepth)
+		return nil
+	}
+
 	tok := b.readToken()
 	if kw, ok := tok.(keyword); ok {
 		switch kw {
@@ -466,6 +480,11 @@ func (b *buffer) readArray() object {
 	var x array
 	for {
 		tok := b.readToken()
+		// Break on io.EOF as well (readToken returns io.EOF as a token value
+		// once the input is exhausted, and readDict already guards for it):
+		// otherwise an array that is never closed, e.g. in a truncated
+		// content stream, loops forever appending io.EOF objects and
+		// allocates memory without bound.
 		if tok == nil || tok == io.EOF || tok == keyword("]") {
 			break
 		}
@@ -488,7 +507,9 @@ func (b *buffer) readDict() object {
 		}
 		n, ok := tok.(name)
 		if !ok {
-			fmt.Printf("DEBUG: %T(%v)\n. Skip dict", tok, tok)
+			if DebugOn {
+				fmt.Printf("DEBUG: %T(%v)\n. Skip dict", tok, tok)
+			}
 			b.errorf("unexpected non-name key %T(%v) parsing dictionary", tok, tok)
 			continue
 		}

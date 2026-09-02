@@ -130,7 +130,18 @@ func NewReader(f io.ReaderAt, size int64) (*Reader, error) {
 // If the PDF is encrypted, NewReaderEncrypted calls pw repeatedly to obtain passwords
 // to try. If pw returns the empty string, NewReaderEncrypted stops trying to decrypt
 // the file and returns an error.
-func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
+func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (r *Reader, err error) {
+	defer func() {
+		if x := recover(); x != nil {
+			r = nil
+			if e, ok := x.(error); ok {
+				err = e
+			} else {
+				err = fmt.Errorf("malformed PDF: %v", x)
+			}
+		}
+	}()
+
 	buf := make([]byte, 10)
 	f.ReadAt(buf, 0)
 	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' {
@@ -152,7 +163,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		return nil, fmt.Errorf("malformed PDF file: missing final startxref")
 	}
 
-	r := &Reader{
+	r = &Reader{
 		f:   f,
 		end: end,
 	}
