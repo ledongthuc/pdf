@@ -239,12 +239,19 @@ func (f Font) getEncoder() TextEncoding {
 		case "MacRomanEncoding":
 			return &byteEncoder{&macRomanEncoding}
 		case "Identity-H":
-			return &byteEncoder{&pdfDocEncoding}
+			// Identity-H is a 2-byte CMap for Type0/CID fonts; without a
+			// usable ToUnicode there is no byte-to-rune table to apply, and
+			// decoding byte-by-byte would produce garbage. Pass the raw
+			// bytes through; proper CID decoding is out of scope here.
+			return &nopEncoder{}
 		default:
+			// Unknown named encoding (Symbol, ZapfDingbats, Identity-V, ...).
+			// None of these match PDFDocEncoding, so guessing a Latin table
+			// would produce wrong but plausible-looking text; pass through.
 			if DebugOn {
 				println("unknown encoding", enc.Name())
 			}
-			return &byteEncoder{&pdfDocEncoding}
+			return &nopEncoder{}
 		}
 	case Dict:
 		return newDictEncoder(enc)
@@ -254,7 +261,7 @@ func (f Font) getEncoder() TextEncoding {
 		if DebugOn {
 			println("unexpected encoding", enc.String())
 		}
-		return &byteEncoder{&pdfDocEncoding}
+		return &nopEncoder{}
 	}
 }
 
@@ -265,7 +272,7 @@ type dictEncoder struct {
 }
 
 // newDictEncoder creates an encoder from an Encoding dictionary.
-// It first applies BaseEncoding (defaulting to StandardEncoding/PDFDocEncoding),
+// It first applies BaseEncoding (defaulting to StandardEncoding),
 // then overlays any Differences.
 func newDictEncoder(enc Value) *dictEncoder {
 	e := &dictEncoder{}
@@ -279,11 +286,19 @@ func newDictEncoder(enc Value) *dictEncoder {
 	case "MacRomanEncoding":
 		baseTable = &macRomanEncoding
 	case "MacExpertEncoding":
-		baseTable = &pdfDocEncoding // fallback
+		// No MacExpertEncoding table yet; its glyphs (small caps,
+		// fractions, ornaments) have no Latin equivalents, so any
+		// substitute is inaccurate. Fall back to StandardEncoding.
+		if DebugOn {
+			println("MacExpertEncoding not supported, falling back to StandardEncoding")
+		}
+		baseTable = &standardEncoding
 	default:
-		// Per PDF spec, if BaseEncoding is absent, use the font's built-in
-		// encoding. For simplicity, we use PDFDocEncoding as fallback.
-		baseTable = &pdfDocEncoding
+		// Per PDF spec, if BaseEncoding is absent the font's built-in
+		// encoding applies, which for nonsymbolic fonts is usually
+		// StandardEncoding. We don't parse font programs, so use
+		// StandardEncoding as the approximation.
+		baseTable = &standardEncoding
 	}
 	copy(e.table[:], baseTable[:])
 
@@ -299,7 +314,9 @@ func newDictEncoder(enc Value) *dictEncoder {
 				continue
 			}
 			if x.Kind() == Name && code >= 0 && code < 256 {
-				if r := nameToRune[x.Name()]; r != 0 {
+				if name := x.Name(); name == ".notdef" {
+					e.table[code] = noRune
+				} else if r := nameToRune[name]; r != 0 {
 					e.table[code] = r
 				}
 				code++
@@ -471,7 +488,11 @@ func readCmap(toUnicode Value) *cmap {
 			n = int(stk.Pop().Int64())
 		case "endbfchar":
 			if n < 0 {
-				panic("missing beginbfchar")
+				if DebugOn {
+					println("missing beginbfchar")
+				}
+				ok = false
+				return
 			}
 			for i := 0; i < n; i++ {
 				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
@@ -481,7 +502,11 @@ func readCmap(toUnicode Value) *cmap {
 			n = int(stk.Pop().Int64())
 		case "endbfrange":
 			if n < 0 {
-				panic("missing beginbfrange")
+				if DebugOn {
+					println("missing beginbfrange")
+				}
+				ok = false
+				return
 			}
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
