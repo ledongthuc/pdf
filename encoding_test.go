@@ -179,6 +179,97 @@ func TestTruncatedToUnicodeFallsBackToEncoding(t *testing.T) {
 	}
 }
 
+// TestHugeCMapCountRejected verifies that an absurd entry count in a CMap
+// section is rejected instead of looping (Pop on an exhausted stack returns
+// zero values, so an unchecked count lets a tiny stream allocate unbounded
+// entries).
+func TestHugeCMapCountRejected(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n" +
+		"9223372036854775807 beginbfchar\nendbfchar\n" +
+		"endcmap"
+
+	pdfData := simpleFontPDF(toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := reader.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want fallback to /Encoding): %v", err)
+	}
+	if got := strings.TrimSpace(text); got != "A" {
+		t.Fatalf("text = %q, want %q (WinAnsi fallback)", got, "A")
+	}
+}
+
+// TestMismatchedCMapSectionsRejected verifies that an end operator of the
+// wrong kind (beginbfchar closed by endbfrange) is treated as a parse
+// failure rather than a matched section.
+func TestMismatchedCMapSectionsRejected(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n" +
+		"1 beginbfchar\n<41> <005A>\nendbfrange\n" +
+		"endcmap"
+
+	pdfData := simpleFontPDF(toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := reader.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want fallback to /Encoding): %v", err)
+	}
+	if got := strings.TrimSpace(text); got != "A" {
+		t.Fatalf("text = %q, want %q (WinAnsi fallback)", got, "A")
+	}
+}
+
+// TestNoCodespaceFallsBackToEncoding verifies that a CMap with mappings but
+// no codespace range is rejected: without a codespace no code can ever
+// match, so everything would decode to the replacement character.
+func TestNoCodespaceFallsBackToEncoding(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 beginbfchar\n<41> <005A>\nendbfchar\n" +
+		"endcmap"
+
+	pdfData := simpleFontPDF(toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := reader.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want fallback to /Encoding): %v", err)
+	}
+	if got := strings.TrimSpace(text); got != "A" {
+		t.Fatalf("text = %q, want %q (WinAnsi fallback)", got, "A")
+	}
+}
+
+func TestUtf16DecodeOddLength(t *testing.T) {
+	// A trailing odd byte must be dropped, not panic on s[i+1].
+	if got := utf16Decode("Z"); got != "" {
+		t.Fatalf("utf16Decode(%q) = %q, want %q", "Z", got, "")
+	}
+	if got := utf16Decode("\x00AZ"); got != "A" {
+		t.Fatalf("utf16Decode(%q) = %q, want %q", "\x00AZ", got, "A")
+	}
+}
+
+func TestCmapDecodeEmptyBFRangeDst(t *testing.T) {
+	// An empty bfrange destination string has no last byte to scale; it
+	// must decode to noRune instead of panicking on b[len(b)-1].
+	m := &cmap{
+		bfrange: []bfrange{{lo: "\x00", hi: "\xff", dst: testValue("")}},
+	}
+	m.space[0] = []byteRange{{low: "\x00", high: "\xff"}}
+	if got := m.Decode("\x01"); got != string(noRune) {
+		t.Fatalf("Decode(0x01) = %q, want %q", got, string(noRune))
+	}
+}
+
 // simpleFontPDF builds a one-page PDF with a single Type1 font using
 // /Encoding /WinAnsiEncoding and the given /ToUnicode stream, whose page
 // draws the single character "A".
