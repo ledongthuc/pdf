@@ -407,6 +407,10 @@ Parse:
 						if len(bfrange.lo) == n && bfrange.lo <= text && text <= bfrange.hi {
 							if bfrange.dst.Kind() == String {
 								s := bfrange.dst.RawString()
+								if len(s) == 0 { // malformed: nothing to scale below
+									r = append(r, noRune)
+									continue Parse
+								}
 								if bfrange.lo != text { // value isn't at the beginning of the range so scale result
 									b := []byte(s)
 									b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1] // increment last byte by difference
@@ -451,8 +455,25 @@ Parse:
 
 func readCmap(toUnicode Value) *cmap {
 	n := -1
+	section := "" // begin/end section currently open, if any
 	var m cmap
 	ok := true
+	// badSection reports (and rejects) an end operator whose section
+	// doesn't match the innermost begin, or whose declared entry count is
+	// negative or larger than the operands actually on the stack (each
+	// entry pops `operands` values). The count comes from untrusted input,
+	// so looping on it unchecked lets a tiny stream allocate unbounded
+	// entries from Pop's zero values.
+	badSection := func(stk *Stack, want string, operands int) bool {
+		if section != want || n < 0 || n > stk.Len()/operands {
+			if DebugOn {
+				println("bad", want, "section")
+			}
+			ok = false
+			return true
+		}
+		return false
+	}
 	Interpret(toUnicode, func(stk *Stack, op string) {
 		if !ok {
 			return
@@ -468,12 +489,9 @@ func readCmap(toUnicode Value) *cmap {
 			stk.Pop()
 		case "begincodespacerange":
 			n = int(stk.Pop().Int64())
+			section = "codespacerange"
 		case "endcodespacerange":
-			if n < 0 {
-				if DebugOn {
-					println("missing begincodespacerange")
-				}
-				ok = false
+			if badSection(stk, "codespacerange", 2) {
 				return
 			}
 			for i := 0; i < n; i++ {
@@ -487,37 +505,31 @@ func readCmap(toUnicode Value) *cmap {
 				}
 				m.space[len(lo)-1] = append(m.space[len(lo)-1], byteRange{lo, hi})
 			}
-			n = -1
+			n, section = -1, ""
 		case "beginbfchar":
 			n = int(stk.Pop().Int64())
+			section = "bfchar"
 		case "endbfchar":
-			if n < 0 {
-				if DebugOn {
-					println("missing beginbfchar")
-				}
-				ok = false
+			if badSection(stk, "bfchar", 2) {
 				return
 			}
 			for i := 0; i < n; i++ {
 				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfchar = append(m.bfchar, bfchar{orig, repl})
 			}
-			n = -1
+			n, section = -1, ""
 		case "beginbfrange":
 			n = int(stk.Pop().Int64())
+			section = "bfrange"
 		case "endbfrange":
-			if n < 0 {
-				if DebugOn {
-					println("missing beginbfrange")
-				}
-				ok = false
+			if badSection(stk, "bfrange", 3) {
 				return
 			}
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
 			}
-			n = -1
+			n, section = -1, ""
 		case "defineresource":
 			stk.Pop().Name() // category
 			value := stk.Pop()
@@ -529,10 +541,10 @@ func readCmap(toUnicode Value) *cmap {
 			}
 		}
 	})
-	if !ok || n != -1 {
-		// n != -1 means the stream ended inside an unterminated
-		// begincodespacerange/beginbfchar/beginbfrange section, so the
-		// CMap is truncated and its mapping data can't be trusted.
+	if !ok || section != "" {
+		// A non-empty section means the stream ended inside an
+		// unterminated begincodespacerange/beginbfchar/beginbfrange
+		// section, so the CMap is truncated and can't be trusted.
 		return nil
 	}
 	if len(m.bfchar) == 0 && len(m.bfrange) == 0 {
@@ -541,7 +553,14 @@ func readCmap(toUnicode Value) *cmap {
 		// to the replacement character.
 		return nil
 	}
-	return &m
+	for _, space := range m.space {
+		if len(space) > 0 {
+			return &m
+		}
+	}
+	// Mappings without any codespace range can never match a code, which
+	// would also decode everything to the replacement character.
+	return nil
 }
 
 type matrix [3][3]float64
