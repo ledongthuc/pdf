@@ -45,6 +45,16 @@ func TestNewDictEncoderOutOfRangeCode(t *testing.T) {
 	if got := e.Decode("A"); got != "Γ" {
 		t.Fatalf("Decode(A) = %q, want %q (valid entry after out-of-range ones)", got, "Γ")
 	}
+
+	// The code counter must keep advancing past out-of-range codes, so a
+	// bad start code doesn't drop later entries that land back in range.
+	e2 := newDictEncoder(testValue(dict{
+		name("BaseEncoding"): name("WinAnsiEncoding"),
+		name("Differences"):  array{int64(-1), name("Alpha"), name("Beta")},
+	}))
+	if got := e2.Decode("\x00"); got != "Β" {
+		t.Fatalf("Decode(0x00) = %q, want %q (resynced after out-of-range start)", got, "Β")
+	}
 }
 
 func TestNewDictEncoderNotdef(t *testing.T) {
@@ -107,6 +117,53 @@ func TestMalformedToUnicodeFallsBackToEncoding(t *testing.T) {
 		"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n" +
 		"endbfchar\n" +
 		"endcmap"
+
+	pdfData := simpleFontPDF(toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := reader.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want fallback to /Encoding): %v", err)
+	}
+	if got := strings.TrimSpace(text); got != "A" {
+		t.Fatalf("text = %q, want %q (WinAnsi fallback)", got, "A")
+	}
+}
+
+// TestOversizedCodespaceRangeDoesNotPanic verifies that a ToUnicode CMap
+// declaring a codespace range wider than 4 bytes (the maximum the cmap
+// decoder supports) is rejected cleanly instead of panicking with an
+// index-out-of-range on the space table.
+func TestOversizedCodespaceRangeDoesNotPanic(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 begincodespacerange\n<0000000000> <FFFFFFFFFF>\nendcodespacerange\n" +
+		"1 beginbfchar\n<41> <005A>\nendbfchar\n" +
+		"endcmap"
+
+	pdfData := simpleFontPDF(toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := reader.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want fallback to /Encoding): %v", err)
+	}
+	if got := strings.TrimSpace(text); got != "A" {
+		t.Fatalf("text = %q, want %q (WinAnsi fallback)", got, "A")
+	}
+}
+
+// TestTruncatedToUnicodeFallsBackToEncoding verifies that a ToUnicode CMap
+// cut off inside a beginbfchar section is treated as unparseable, so
+// extraction falls back to /Encoding instead of decoding every code to the
+// replacement character.
+func TestTruncatedToUnicodeFallsBackToEncoding(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n" +
+		"1 beginbfchar\n<41> <005A>"
 
 	pdfData := simpleFontPDF(toUnicode)
 	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
