@@ -11,6 +11,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 // A Page represent a single page in a PDF file.
@@ -210,6 +213,8 @@ func (f Font) getEncoder() TextEncoding {
 			return &byteEncoder{&macRomanEncoding}
 		case "Identity-H":
 			return f.charmapEncoding()
+		case "GBK-EUC-H":
+			return newGBKEncoder()
 		default:
 			if DebugOn {
 				println("unknown encoding", enc.Name())
@@ -285,6 +290,26 @@ type nopEncoder struct {
 
 func (e *nopEncoder) Decode(raw string) (text string) {
 	return raw
+}
+
+func newGBKEncoder() TextEncoding {
+	return &chineseEncoder{decoder: simplifiedchinese.GBK.NewDecoder()}
+}
+
+type chineseEncoder struct {
+	decoder *encoding.Decoder
+}
+
+func (e *chineseEncoder) Decode(raw string) (text string) {
+	var err error
+	text, err = e.decoder.String(raw)
+	if err != nil {
+		if DebugOn {
+			println("GBK decode error:", err)
+		}
+		return raw
+	}
+	return text
 }
 
 type byteEncoder struct {
