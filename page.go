@@ -315,9 +315,9 @@ func newDictEncoder(enc Value) *dictEncoder {
 			}
 			if x.Kind() == Name {
 				if code >= 0 && code < 256 {
-					if name := x.Name(); name == ".notdef" {
+					if glyphName := x.Name(); glyphName == ".notdef" {
 						e.table[code] = noRune
-					} else if r := nameToRune[name]; r != 0 {
+					} else if r := nameToRune[glyphName]; r != 0 {
 						e.table[code] = r
 					}
 				}
@@ -388,6 +388,17 @@ type cmap struct {
 	bfchar  []bfchar
 }
 
+// appendDecoded appends the UTF-16BE decoding of s to r. A non-empty s that
+// decodes to nothing (e.g. a malformed single-byte destination) appends
+// noRune so the source character isn't silently deleted; a genuinely empty
+// destination still maps to nothing.
+func appendDecoded(r []rune, s string) []rune {
+	if d := utf16Decode(s); d != "" || s == "" {
+		return append(r, []rune(d)...)
+	}
+	return append(r, noRune)
+}
+
 func (m *cmap) Decode(raw string) (text string) {
 	var r []rune
 Parse:
@@ -399,7 +410,7 @@ Parse:
 					raw = raw[n:]
 					for _, bfchar := range m.bfchar { // check for matching bfchar
 						if len(bfchar.orig) == n && bfchar.orig == text {
-							r = append(r, []rune(utf16Decode(bfchar.repl))...)
+							r = appendDecoded(r, bfchar.repl)
 							continue Parse
 						}
 					}
@@ -416,15 +427,14 @@ Parse:
 									b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1] // increment last byte by difference
 									s = string(b)
 								}
-								r = append(r, []rune(utf16Decode(s))...)
+								r = appendDecoded(r, s)
 								continue Parse
 							}
 							if bfrange.dst.Kind() == Array {
 								n := text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
 								v := bfrange.dst.Index(int(n))
 								if v.Kind() == String {
-									s := v.RawString()
-									r = append(r, []rune(utf16Decode(s))...)
+									r = appendDecoded(r, v.RawString())
 									continue Parse
 								}
 								if DebugOn {
@@ -453,19 +463,32 @@ Parse:
 	return string(r)
 }
 
-func readCmap(toUnicode Value) *cmap {
+func readCmap(toUnicode Value) (cm *cmap) {
+	defer func() {
+		if e := recover(); e != nil {
+			// Interpret panics on malformed PostScript (unmatched end,
+			// begin on a non-dict, currentdict with no dictionary, ...).
+			// Treat that as a parse failure so the caller falls back to
+			// /Encoding instead of crashing text extraction.
+			if DebugOn {
+				println("readCmap:", fmt.Sprint(e))
+			}
+			cm = nil
+		}
+	}()
 	n := -1
 	section := "" // begin/end section currently open, if any
+	base := 0     // stack depth when the current section began
 	var m cmap
 	ok := true
 	// badSection reports (and rejects) an end operator whose section
 	// doesn't match the innermost begin, or whose declared entry count is
-	// negative or larger than the operands actually on the stack (each
+	// negative or larger than the operands pushed since the begin (each
 	// entry pops `operands` values). The count comes from untrusted input,
 	// so looping on it unchecked lets a tiny stream allocate unbounded
 	// entries from Pop's zero values.
 	badSection := func(stk *Stack, want string, operands int) bool {
-		if section != want || n < 0 || n > stk.Len()/operands {
+		if section != want || n < 0 || n > (stk.Len()-base)/operands {
 			if DebugOn {
 				println("bad", want, "section")
 			}
@@ -489,6 +512,7 @@ func readCmap(toUnicode Value) *cmap {
 			stk.Pop()
 		case "begincodespacerange":
 			n = int(stk.Pop().Int64())
+			base = stk.Len()
 			section = "codespacerange"
 		case "endcodespacerange":
 			if badSection(stk, "codespacerange", 2) {
@@ -508,6 +532,7 @@ func readCmap(toUnicode Value) *cmap {
 			n, section = -1, ""
 		case "beginbfchar":
 			n = int(stk.Pop().Int64())
+			base = stk.Len()
 			section = "bfchar"
 		case "endbfchar":
 			if badSection(stk, "bfchar", 2) {
@@ -520,6 +545,7 @@ func readCmap(toUnicode Value) *cmap {
 			n, section = -1, ""
 		case "beginbfrange":
 			n = int(stk.Pop().Int64())
+			base = stk.Len()
 			section = "bfrange"
 		case "endbfrange":
 			if badSection(stk, "bfrange", 3) {
