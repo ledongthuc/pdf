@@ -163,4 +163,12 @@ func TestOkayV4(t *testing.T) {
 	if okayV4(badLength) {
 		t.Fatal("okayV4 should reject non-16-byte key length")
 	}
+	badCFType := dict{
+		name("CF"):   dict{name("StdCF"): int64(1234)}, // CF value is not a dict
+		name("StmF"): name("StdCF"),
+		name("StrF"): name("StdCF"),
+	}
+	if okayV4(badCFType) {
+		t.Fatal("okayV4 should reject a non-dict CF entry")
+	}
 }

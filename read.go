@@ -4,7 +4,7 @@
 
 // Package pdf implements reading of PDF files.
 //
-// Overview
+// # Overview
 //
 // PDF is Adobe's Portable Document Format, ubiquitous on the internet.
 // A PDF document is a complex data format built on a fairly simple structure.
@@ -43,7 +43,6 @@
 // they are implemented only in terms of the Value API and could be moved outside
 // the package. Equally important, traversal of other PDF data structures can be implemented
 // in other packages as needed.
-//
 package pdf
 
 // BUG(rsc): The package is incomplete, although it has been used successfully on some
@@ -94,10 +93,6 @@ type xref struct {
 	inStream bool
 	stream   objptr
 	offset   int64
-}
-
-func (r *Reader) errorf(format string, args ...interface{}) {
-	panic(fmt.Errorf(format, args...))
 }
 
 // Open opens a file for reading.
@@ -222,6 +217,26 @@ func readXref(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	return nil, objptr{}, nil, fmt.Errorf("malformed PDF: cross-reference table not found: %v", tok)
 }
 
+// readPrevXrefs walks a /Prev chain of cross-reference sections. first is the
+// /Prev entry of the most recently read section; parse is called with a buffer
+// positioned at the start of each previous section and must return that
+// section's own /Prev entry (or nil) to continue the chain.
+func readPrevXrefs(r *Reader, first object, parse func(b *buffer) (object, error)) error {
+	for prev := first; prev != nil; {
+		off, ok := prev.(int64)
+		if !ok {
+			return fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prev)
+		}
+		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
+		next, err := parse(b)
+		if err != nil {
+			return err
+		}
+		prev = next
+	}
+	return nil
+}
+
 func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	obj1 := b.readObject()
 	obj, ok := obj1.(objdef)
@@ -247,36 +262,36 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 	}
 
-	for prevoff := strm.hdr["Prev"]; prevoff != nil; {
-		off, ok := prevoff.(int64)
-		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
-		}
-		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
+	err = readPrevXrefs(r, strm.hdr["Prev"], func(b *buffer) (object, error) {
 		obj1 := b.readObject()
 		obj, ok := obj1.(objdef)
 		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream not found: %v", objfmt(obj1))
+			return nil, fmt.Errorf("malformed PDF: xref prev stream not found: %v", objfmt(obj1))
 		}
 		prevstrm, ok := obj.obj.(stream)
 		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream not found: %v", objfmt(obj))
+			return nil, fmt.Errorf("malformed PDF: xref prev stream not found: %v", objfmt(obj))
 		}
-		prevoff = prevstrm.hdr["Prev"]
 		prev := Value{r, objptr{}, prevstrm}
 		if prev.Kind() != Stream {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream is not stream: %v", prev)
+			return nil, fmt.Errorf("malformed PDF: xref prev stream is not stream: %v", prev)
 		}
 		if prev.Key("Type").Name() != "XRef" {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream does not have type XRef")
+			return nil, fmt.Errorf("malformed PDF: xref prev stream does not have type XRef")
 		}
 		psize := prev.Key("Size").Int64()
 		if psize > size {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream larger than last stream")
+			return nil, fmt.Errorf("malformed PDF: xref prev stream larger than last stream")
 		}
-		if table, err = readXrefStreamData(r, prev.data.(stream), table, psize); err != nil {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: reading xref prev stream: %v", err)
+		var dataErr error
+		table, dataErr = readXrefStreamData(r, prev.data.(stream), table, psize)
+		if dataErr != nil {
+			return nil, fmt.Errorf("malformed PDF: reading xref prev stream: %v", dataErr)
 		}
+		return prevstrm.hdr["Prev"], nil
+	})
+	if err != nil {
+		return nil, objptr{}, nil, err
 	}
 
 	return table, strmptr, strm.hdr, nil
@@ -385,26 +400,23 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref table not followed by trailer dictionary")
 	}
 
-	for prevoff := trailer["Prev"]; prevoff != nil; {
-		off, ok := prevoff.(int64)
+	err = readPrevXrefs(r, trailer["Prev"], func(b *buffer) (object, error) {
+		if tok := b.readToken(); tok != keyword("xref") {
+			return nil, fmt.Errorf("malformed PDF: xref Prev does not point to xref")
+		}
+		var dataErr error
+		table, dataErr = readXrefTableData(b, table)
+		if dataErr != nil {
+			return nil, fmt.Errorf("malformed PDF: %v", dataErr)
+		}
+		prevTrailer, ok := b.readObject().(dict)
 		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
+			return nil, fmt.Errorf("malformed PDF: xref Prev table not followed by trailer dictionary")
 		}
-		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
-		tok := b.readToken()
-		if tok != keyword("xref") {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev does not point to xref")
-		}
-		table, err = readXrefTableData(b, table)
-		if err != nil {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
-		}
-
-		trailer, ok := b.readObject().(dict)
-		if !ok {
-			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev table not followed by trailer dictionary")
-		}
-		prevoff = trailer["Prev"]
+		return prevTrailer["Prev"], nil
+	})
+	if err != nil {
+		return nil, objptr{}, nil, err
 	}
 
 	size, ok := trailer[name("Size")].(int64)
@@ -624,7 +636,7 @@ func (v Value) RawString() string {
 	return x
 }
 
-// Text returns v's string value interpreted as a ``text string'' (defined in the PDF spec)
+// Text returns v's string value interpreted as a “text string” (defined in the PDF spec)
 // and converted to UTF-8.
 // If v.Kind() != String, Text returns the empty string.
 func (v Value) Text() string {
@@ -813,7 +825,7 @@ func (e *errorReadCloser) Close() error {
 
 // Reader returns the data contained in the stream v.
 // If v.Kind() != Stream, Reader returns a ReadCloser that
-// responds to all reads with a ``stream not present'' error.
+// responds to all reads with a “stream not present” error.
 func (v Value) Reader() io.ReadCloser {
 	x, ok := v.data.(stream)
 	if !ok {
@@ -924,6 +936,26 @@ var passwordPad = []byte{
 	0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 }
 
+// PDF encryption parameters. See PDF 32000-1:2008, §7.6.
+const (
+	// minKeyBits and maxKeyBits bound the /Length value (in bits) in the
+	// encryption dictionary.
+	minKeyBits = 40
+	maxKeyBits = 128
+
+	// ouEntryLen is the byte length of the O and U entries for encryption
+	// revisions 2 through 4.
+	ouEntryLen = 32
+
+	// md5KeyIterations is the number of MD5 rounds used to derive the file
+	// key for revisions >= 3 (Algorithm 2, step (b)).
+	md5KeyIterations = 50
+
+	// rc4UIterations is the number of RC4 rounds used to derive U for
+	// revisions >= 3 (Algorithm 5).
+	rc4UIterations = 19
+)
+
 func (r *Reader) initEncrypt(password string) error {
 	// See PDF 32000-1:2008, §7.6.
 	encrypt, _ := r.resolve(objptr{}, r.trailer["Encrypt"]).data.(dict)
@@ -932,9 +964,9 @@ func (r *Reader) initEncrypt(password string) error {
 	}
 	n, _ := encrypt["Length"].(int64)
 	if n == 0 {
-		n = 40
+		n = minKeyBits
 	}
-	if n%8 != 0 || n > 128 || n < 40 {
+	if n%8 != 0 || n > maxKeyBits || n < minKeyBits {
 		return fmt.Errorf("malformed PDF: %d-bit encryption key", n)
 	}
 	V, _ := encrypt["V"].(int64)
@@ -961,7 +993,7 @@ func (r *Reader) initEncrypt(password string) error {
 	}
 	O, _ := encrypt["O"].(string)
 	U, _ := encrypt["U"].(string)
-	if len(O) != 32 || len(U) != 32 {
+	if len(O) != ouEntryLen || len(U) != ouEntryLen {
 		return fmt.Errorf("malformed PDF: missing O= or U= encryption parameters")
 	}
 	p, _ := encrypt["P"].(int64)
@@ -970,26 +1002,27 @@ func (r *Reader) initEncrypt(password string) error {
 	// TODO: Password should be converted to Latin-1.
 	pw := []byte(password)
 	h := md5.New()
-	if len(pw) >= 32 {
-		h.Write(pw[:32])
+	if len(pw) >= len(passwordPad) {
+		h.Write(pw[:len(passwordPad)])
 	} else {
 		h.Write(pw)
-		h.Write(passwordPad[:32-len(pw)])
+		h.Write(passwordPad[:len(passwordPad)-len(pw)])
 	}
 	h.Write([]byte(O))
 	h.Write([]byte{byte(P), byte(P >> 8), byte(P >> 16), byte(P >> 24)})
 	h.Write([]byte(ID))
 	key := h.Sum(nil)
 
+	keyLen := int(n / 8) // encryption key length in bytes
 	if R >= 3 {
-		for i := 0; i < 50; i++ {
+		for i := 0; i < md5KeyIterations; i++ {
 			h.Reset()
-			h.Write(key[:n/8])
+			h.Write(key[:keyLen])
 			key = h.Sum(key[:0])
 		}
-		key = key[:n/8]
+		key = key[:keyLen]
 	} else {
-		key = key[:40/8]
+		key = key[:minKeyBits/8]
 	}
 
 	c, err := rc4.NewCipher(key)
@@ -999,7 +1032,7 @@ func (r *Reader) initEncrypt(password string) error {
 
 	var u []byte
 	if R == 2 {
-		u = make([]byte, 32)
+		u = make([]byte, len(passwordPad))
 		copy(u, passwordPad)
 		c.XORKeyStream(u, u)
 	} else {
@@ -1009,7 +1042,7 @@ func (r *Reader) initEncrypt(password string) error {
 		u = h.Sum(nil)
 		c.XORKeyStream(u, u)
 
-		for i := 1; i <= 19; i++ {
+		for i := 1; i <= rc4UIterations; i++ {
 			key1 := make([]byte, len(key))
 			copy(key1, key)
 			for j := range key1 {
@@ -1049,6 +1082,9 @@ func okayV4(encrypt dict) bool {
 		return false
 	}
 	cfparam, ok := cf[stmf].(dict)
+	if !ok {
+		return false
+	}
 	if cfparam["AuthEvent"] != nil && cfparam["AuthEvent"] != name("DocOpen") {
 		return false
 	}

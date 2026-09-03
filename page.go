@@ -67,10 +67,9 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 	fonts := make(map[string]*Font)
 	for i := 1; i <= pages; i++ {
 		p := r.Page(i)
-		for _, name := range p.Fonts() { // cache fonts so we don't continually parse charmap
+		for name, f := range p.fontCache() { // cache fonts so we don't continually parse charmap
 			if _, ok := fonts[name]; !ok {
-				f := p.Font(name)
-				fonts[name] = &f
+				fonts[name] = f
 			}
 		}
 		text, err := p.GetPlainText(fonts)
@@ -146,6 +145,19 @@ func (p Page) Fonts() []string {
 // Font returns the font with the given name associated with the page.
 func (p Page) Font(name string) Font {
 	return Font{p.Resources().Key("Font").Key(name), nil}
+}
+
+// fontCache returns the page's fonts keyed by name, parsing each font only
+// once so that repeated text operations don't re-parse its charmap.
+func (p Page) fontCache() map[string]*Font {
+	fonts := make(map[string]*Font)
+	for _, name := range p.Fonts() {
+		if _, ok := fonts[name]; !ok {
+			f := p.Font(name)
+			fonts[name] = &f
+		}
+	}
+	return fonts
 }
 
 // A Font represent a font in a PDF file.
@@ -532,15 +544,29 @@ func popArgs(stk *Stack) []Value {
 	return args
 }
 
+// recoverTo recovers from a panic raised while parsing PDF content and stores
+// it in err, after calling reset to discard any partially built result. It is
+// meant to be deferred by methods that use panic-based parse error handling.
+func recoverTo(err *error, reset func()) {
+	if r := recover(); r != nil {
+		reset()
+		*err = errors.New(fmt.Sprint(r))
+	}
+}
+
+// decodeText decodes raw font code points with enc and returns UTF-8 text.
+func decodeText(enc TextEncoding, raw string) string {
+	var b strings.Builder
+	for _, ch := range enc.Decode(raw) {
+		b.WriteRune(ch)
+	}
+	return b.String()
+}
+
 // GetPlainText returns the page's all text without format.
 // fonts can be passed in (to improve parsing performance) or left nil
 func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			result = ""
-			err = errors.New(fmt.Sprint(r))
-		}
-	}()
+	defer recoverTo(&err, func() { result = "" })
 
 	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
@@ -550,11 +576,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 	var enc TextEncoding = &nopEncoder{}
 
 	if fonts == nil {
-		fonts = make(map[string]*Font)
-		for _, font := range p.Fonts() {
-			f := p.Font(font)
-			fonts[font] = &f
-		}
+		fonts = p.fontCache()
 	}
 
 	var textBuilder bytes.Buffer
@@ -562,12 +584,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		textBuilder.WriteString(s)
 	}
 	showEncodedText := func(s string) {
-		for _, ch := range enc.Decode(s) {
-			_, err := textBuilder.WriteRune(ch)
-			if err != nil {
-				panic(err)
-			}
-		}
+		textBuilder.WriteString(decodeText(enc, s))
 	}
 
 	Interpret(strm, func(stk *Stack, op string) {
@@ -629,28 +646,12 @@ type Column struct {
 type Columns []*Column
 
 // GetTextByColumn returns the page's all text grouped by column
-func (p Page) GetTextByColumn() (Columns, error) {
-	result := Columns{}
-	var err error
-
-	defer func() {
-		if r := recover(); r != nil {
-			result = Columns{}
-			err = errors.New(fmt.Sprint(r))
-		}
-	}()
+func (p Page) GetTextByColumn() (result Columns, err error) {
+	defer recoverTo(&err, func() { result = Columns{} })
 
 	showText := func(enc TextEncoding, currentX, currentY float64, s string) {
-		var textBuilder bytes.Buffer
-
-		for _, ch := range enc.Decode(s) {
-			_, err := textBuilder.WriteRune(ch)
-			if err != nil {
-				panic(err)
-			}
-		}
 		text := Text{
-			S: textBuilder.String(),
+			S: decodeText(enc, s),
 			X: currentX,
 			Y: currentY,
 		}
@@ -699,32 +700,12 @@ type Row struct {
 type Rows []*Row
 
 // GetTextByRow returns the page's all text grouped by rows
-func (p Page) GetTextByRow() (Rows, error) {
-	result := Rows{}
-	var err error
-
-	defer func() {
-		if r := recover(); r != nil {
-			result = Rows{}
-			err = errors.New(fmt.Sprint(r))
-		}
-	}()
+func (p Page) GetTextByRow() (result Rows, err error) {
+	defer recoverTo(&err, func() { result = Rows{} })
 
 	showText := func(enc TextEncoding, currentX, currentY float64, s string) {
-		var textBuilder bytes.Buffer
-		for _, ch := range enc.Decode(s) {
-			_, err := textBuilder.WriteRune(ch)
-			if err != nil {
-				panic(err)
-			}
-		}
-
-		// if DebugOn {
-		// 	fmt.Println(textBuilder.String())
-		// }
-
 		text := Text{
-			S: textBuilder.String(),
+			S: decodeText(enc, s),
 			X: currentX,
 			Y: currentY,
 		}
@@ -771,11 +752,7 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 
 	strm := p.V.Key("Contents")
 
-	fonts := make(map[string]*Font)
-	for _, font := range p.Fonts() {
-		f := p.Font(font)
-		fonts[font] = &f
-	}
+	fonts := p.fontCache()
 
 	var enc TextEncoding = &nopEncoder{}
 	var currentX, currentY float64
