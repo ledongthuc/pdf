@@ -75,7 +75,7 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 		}
 		text, err := p.GetPlainText(fonts)
 		if err != nil {
-			return &bytes.Buffer{}, err
+			return nil, err
 		}
 		buf.WriteString(text)
 	}
@@ -192,7 +192,11 @@ func (f Font) Width(code int) float64 {
 }
 
 // Encoder returns the encoding between font code point sequences and UTF-8.
-func (f Font) Encoder() TextEncoding {
+//
+// The receiver is a pointer so the parsed encoding is cached on the Font;
+// with a value receiver the assignment to f.enc would be discarded with the
+// copy, defeating the caching entirely.
+func (f *Font) Encoder() TextEncoding {
 	if f.enc == nil { // caching the Encoder so we don't have to continually parse charmap
 		f.enc = f.getEncoder()
 	}
@@ -516,6 +520,18 @@ type gstate struct {
 	CTM   matrix
 }
 
+// popArgs pops every value currently on the stack and returns them with the
+// bottom of the stack at args[0], matching the operand order expected by PDF
+// content-stream operators.
+func popArgs(stk *Stack) []Value {
+	n := stk.Len()
+	args := make([]Value, n)
+	for i := n - 1; i >= 0; i-- {
+		args[i] = stk.Pop()
+	}
+	return args
+}
+
 // GetPlainText returns the page's all text without format.
 // fonts can be passed in (to improve parsing performance) or left nil
 func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
@@ -555,11 +571,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 	}
 
 	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
+		args := popArgs(stk)
 
 		switch op {
 		default:
@@ -768,11 +780,7 @@ func (p Page) walkTextBlocks(walker func(enc TextEncoding, x, y float64, s strin
 	var enc TextEncoding = &nopEncoder{}
 	var currentX, currentY float64
 	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
+		args := popArgs(stk)
 
 		// if DebugOn {
 		// 	fmt.Println(op, "->", args)
@@ -867,11 +875,7 @@ func (p Page) Content() Content {
 	var rect []Rect
 	var gstack []gstate
 	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
+		args := popArgs(stk)
 		switch op {
 		default:
 			// if DebugOn {

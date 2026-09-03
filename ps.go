@@ -5,8 +5,8 @@
 package pdf
 
 import (
-	"fmt"
 	"io"
+	"runtime"
 )
 
 // A Stack represents a stack of values.
@@ -166,23 +166,16 @@ Reading:
 // the underlying buffer's position landed.
 func readObjectRecover(b *buffer) (obj object, ok bool) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
+			// Parse errors are raised with panic(fmt.Errorf(...)) and mean
+			// "discard this operand and keep going". Anything else (nil
+			// deref, index out of range, ...) is a genuine bug and must not
+			// be silently swallowed as malformed input.
+			if _, isRuntime := r.(runtime.Error); isRuntime {
+				panic(r)
+			}
 			obj, ok = nil, false
 		}
 	}()
 	return b.readObject(), true
-}
-
-type seqReader struct {
-	rd     io.Reader
-	offset int64
-}
-
-func (r *seqReader) ReadAt(buf []byte, offset int64) (int, error) {
-	if offset != r.offset {
-		return 0, fmt.Errorf("non-sequential read of stream")
-	}
-	n, err := io.ReadFull(r.rd, buf)
-	r.offset += int64(n)
-	return n, err
 }

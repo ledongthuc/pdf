@@ -70,7 +70,6 @@ import (
 	"encoding/ascii85"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"sort"
 	"strconv"
@@ -105,7 +104,7 @@ func (r *Reader) errorf(format string, args ...interface{}) {
 func Open(file string) (*os.File, *Reader, error) {
 	f, err := os.Open(file)
 	if err != nil {
-		f.Close()
+		// f is nil here; calling f.Close() would panic.
 		return nil, nil, err
 	}
 	fi, err := f.Stat()
@@ -334,9 +333,7 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 			v2 := decodeInt(buf[w[0] : w[0]+w[1]])
 			v3 := decodeInt(buf[w[0]+w[1] : w[0]+w[1]+w[2]])
 			x := int(start) + i
-			for cap(table) <= x {
-				table = append(table[:cap(table)], xref{})
-			}
+			table = ensureXrefLen(table, x)
 			if table[x].ptr != (objptr{}) {
 				continue
 			}
@@ -363,6 +360,16 @@ func decodeInt(b []byte) int {
 		x = x<<8 | int(c)
 	}
 	return x
+}
+
+// ensureXrefLen grows table, if needed, so that table[x] is a valid element.
+// The previous idiom (repeatedly append(table[:cap(table)], xref{})) was
+// correct but hard to follow, so this replaces it with an explicit resize.
+func ensureXrefLen(table []xref, x int) []xref {
+	if x < len(table) {
+		return table
+	}
+	return append(table, make([]xref, x-len(table)+1)...)
 }
 
 func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
@@ -431,12 +438,7 @@ func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 				return nil, fmt.Errorf("malformed xref table")
 			}
 			x := int(start) + i
-			for cap(table) <= x {
-				table = append(table[:cap(table)], xref{})
-			}
-			if len(table) <= x {
-				table = table[:x+1]
-			}
+			table = ensureXrefLen(table, x)
 			if alloc == "n" && table[x].offset == 0 {
 				table[x] = xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)}
 			}
@@ -821,7 +823,7 @@ func (v Value) Reader() io.ReadCloser {
 	// Handle empty streams - return empty reader without applying filters.
 	// This avoids zlib "unexpected EOF" errors on 0-length FlateDecode streams.
 	if streamLen == 0 {
-		return ioutil.NopCloser(bytes.NewReader(nil))
+		return io.NopCloser(bytes.NewReader(nil))
 	}
 	var rd io.Reader
 	rd = io.NewSectionReader(v.r.f, x.offset, streamLen)
@@ -843,7 +845,7 @@ func (v Value) Reader() io.ReadCloser {
 		}
 	}
 
-	return ioutil.NopCloser(rd)
+	return io.NopCloser(rd)
 }
 
 func applyFilter(rd io.Reader, name string, param Value) io.Reader {
