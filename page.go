@@ -313,12 +313,16 @@ func newDictEncoder(enc Value) *dictEncoder {
 				code = int(x.Int64())
 				continue
 			}
-			if x.Kind() == Name && code >= 0 && code < 256 {
-				if name := x.Name(); name == ".notdef" {
-					e.table[code] = noRune
-				} else if r := nameToRune[name]; r != 0 {
-					e.table[code] = r
+			if x.Kind() == Name {
+				if code >= 0 && code < 256 {
+					if name := x.Name(); name == ".notdef" {
+						e.table[code] = noRune
+					} else if r := nameToRune[name]; r != 0 {
+						e.table[code] = r
+					}
 				}
+				// Advance even when code is out of range so that a bad
+				// start code doesn't shift or drop later entries.
 				code++
 			}
 		}
@@ -474,7 +478,7 @@ func readCmap(toUnicode Value) *cmap {
 			}
 			for i := 0; i < n; i++ {
 				hi, lo := stk.Pop().RawString(), stk.Pop().RawString()
-				if len(lo) == 0 || len(lo) != len(hi) {
+				if len(lo) == 0 || len(lo) > 4 || len(lo) != len(hi) {
 					if DebugOn {
 						println("bad codespace range")
 					}
@@ -498,6 +502,7 @@ func readCmap(toUnicode Value) *cmap {
 				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfchar = append(m.bfchar, bfchar{orig, repl})
 			}
+			n = -1
 		case "beginbfrange":
 			n = int(stk.Pop().Int64())
 		case "endbfrange":
@@ -512,6 +517,7 @@ func readCmap(toUnicode Value) *cmap {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
 			}
+			n = -1
 		case "defineresource":
 			stk.Pop().Name() // category
 			value := stk.Pop()
@@ -523,7 +529,16 @@ func readCmap(toUnicode Value) *cmap {
 			}
 		}
 	})
-	if !ok {
+	if !ok || n != -1 {
+		// n != -1 means the stream ended inside an unterminated
+		// begincodespacerange/beginbfchar/beginbfrange section, so the
+		// CMap is truncated and its mapping data can't be trusted.
+		return nil
+	}
+	if len(m.bfchar) == 0 && len(m.bfrange) == 0 {
+		// No mapping data at all: report failure so the caller falls
+		// back to the font's /Encoding instead of decoding every code
+		// to the replacement character.
 		return nil
 	}
 	return &m
