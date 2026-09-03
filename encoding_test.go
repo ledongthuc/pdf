@@ -248,6 +248,65 @@ func TestNoCodespaceFallsBackToEncoding(t *testing.T) {
 	}
 }
 
+// TestInterpreterPanicFallsBackToEncoding verifies that PostScript-level
+// panics inside Interpret (here an unmatched "end") are contained at the
+// readCmap boundary so extraction falls back to /Encoding.
+func TestInterpreterPanicFallsBackToEncoding(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n" +
+		"1 beginbfchar\n<41> <005A>\nendbfchar\n" +
+		"endcmap\nend"
+
+	pdfData := simpleFontPDF(toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := reader.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want fallback to /Encoding): %v", err)
+	}
+	if got := strings.TrimSpace(text); got != "A" {
+		t.Fatalf("text = %q, want %q (WinAnsi fallback)", got, "A")
+	}
+}
+
+// TestMissingSectionOperandRejected verifies that the entry-count check
+// only counts operands pushed since the section began: a bfchar entry
+// missing its source operand must not pass validation by borrowing
+// unrelated values (like the dict begincmap pushes) from the stack.
+func TestMissingSectionOperandRejected(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n" +
+		"1 beginbfchar\n<005A>\nendbfchar\n" +
+		"endcmap"
+
+	pdfData := simpleFontPDF(toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := reader.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want fallback to /Encoding): %v", err)
+	}
+	if got := strings.TrimSpace(text); got != "A" {
+		t.Fatalf("text = %q, want %q (WinAnsi fallback)", got, "A")
+	}
+}
+
+func TestCmapDecodeOddLengthDst(t *testing.T) {
+	// A destination that decodes to no UTF-16 units (a single malformed
+	// byte) must yield noRune, not silently delete the source character.
+	m := &cmap{
+		bfchar: []bfchar{{orig: "\x01", repl: "Z"}},
+	}
+	m.space[0] = []byteRange{{low: "\x00", high: "\xff"}}
+	if got := m.Decode("\x01"); got != string(noRune) {
+		t.Fatalf("Decode(0x01) = %q, want %q", got, string(noRune))
+	}
+}
+
 func TestUtf16DecodeOddLength(t *testing.T) {
 	// A trailing odd byte must be dropped, not panic on s[i+1].
 	if got := utf16Decode("Z"); got != "" {
