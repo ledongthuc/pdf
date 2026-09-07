@@ -1,6 +1,8 @@
 package pdf
 
 import (
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -31,10 +33,8 @@ func TestUcs2Encoder(t *testing.T) {
 	const want = "江苏银行(交易扣款回单)"
 	if text != want {
 		t.Errorf("got %q, want %q", text, want)
-	"reflect"
-	"sort"
-	"testing"
-)
+	}
+}
 
 func TestNopEncoder(t *testing.T) {
 	e := &nopEncoder{}
