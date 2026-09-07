@@ -226,6 +226,8 @@ func (f Font) getEncoder() TextEncoding {
 			return &byteEncoder{&macRomanEncoding}
 		case "Identity-H":
 			return f.charmapEncoding()
+		case "UniGB-UCS2-H":
+			return &ucs2Encoder{}
 		default:
 			if DebugOn {
 				println("unknown encoding", enc.Name())
@@ -301,6 +303,12 @@ type nopEncoder struct {
 
 func (e *nopEncoder) Decode(raw string) (text string) {
 	return raw
+}
+
+type ucs2Encoder struct{}
+
+func (e *ucs2Encoder) Decode(raw string) (text string) {
+	return utf16Decode(raw)
 }
 
 type byteEncoder struct {
