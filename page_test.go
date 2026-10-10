@@ -90,6 +90,18 @@ func TestCmapDecodeBFChar(t *testing.T) {
 	}
 }
 
+func TestCmapDecodeBFRangeCarry(t *testing.T) {
+	m := &cmap{
+		space:   [4][]byteRange{},
+		bfrange: []bfrange{{lo: "\x00\x00", hi: "\xff\xff", dst: Value{data: "\x00\x00"}}}, // identity map
+	}
+	m.space[1] = []byteRange{{low: "\x00\x00", high: "\xff\xff"}}
+
+	if got, want := m.Decode("\x20\x22\x01\x41"), "\u2022\u0141"; got != want {
+		t.Fatalf("Decode = %q, want %q", got, want)
+	}
+}
+
 func TestMatrixMul(t *testing.T) {
 	m := matrix{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}}
 	if got := ident.mul(m); got != m {

@@ -365,9 +365,7 @@ Parse:
 							if bfrange.dst.Kind() == String {
 								s := bfrange.dst.RawString()
 								if bfrange.lo != text { // value isn't at the beginning of the range so scale result
-									b := []byte(s)
-									b[len(b)-1] += text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1] // increment last byte by difference
-									s = string(b)
+									s = addOffset(s, beUint(text)-beUint(bfrange.lo))
 								}
 								r = append(r, []rune(utf16Decode(s))...)
 								continue Parse
@@ -1089,4 +1087,25 @@ func buildOutline(entry Value) Outline {
 		x.Child = append(x.Child, buildOutline(child))
 	}
 	return x
+}
+
+// beUint reads a big-endian code of up to 4 bytes.
+func beUint(s string) uint32 {
+	var v uint32
+	for i := 0; i < len(s); i++ {
+		v = v<<8 | uint32(s[i])
+	}
+	return v
+}
+
+// addOffset adds off to the big-endian value in s, keeping its width and carrying across bytes.
+func addOffset(s string, off uint32) string {
+	b := []byte(s)
+	carry := off
+	for i := len(b) - 1; i >= 0 && carry > 0; i-- {
+		sum := uint32(b[i]) + carry&0xff
+		b[i] = byte(sum)
+		carry = carry>>8 + sum>>8
+	}
+	return string(b)
 }
