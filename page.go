@@ -216,6 +216,20 @@ func (f *Font) Encoder() TextEncoding {
 }
 
 func (f Font) getEncoder() TextEncoding {
+	// Check ToUnicode first - it's the authoritative character mapping
+	// per PDF spec and takes precedence over Encoding
+	toUnicode := f.V.Key("ToUnicode")
+	if toUnicode.Kind() == Stream {
+		if m := readCmap(toUnicode); m != nil {
+			return m
+		}
+		// ToUnicode stream exists but failed to parse - fall through to Encoding
+		if DebugOn {
+			println("ToUnicode stream failed to parse, falling back to Encoding")
+		}
+	}
+
+	// Fall back to Encoding-based decoding
 	enc := f.V.Key("Encoding")
 	switch enc.Kind() {
 	case Name:
@@ -225,19 +239,26 @@ func (f Font) getEncoder() TextEncoding {
 		case "MacRomanEncoding":
 			return &byteEncoder{&macRomanEncoding}
 		case "Identity-H":
-			return f.charmapEncoding()
+			// Identity-H is a 2-byte CMap for Type0/CID fonts; without a
+			// usable ToUnicode there is no byte-to-rune table to apply, and
+			// decoding byte-by-byte would produce garbage. Pass the raw
+			// bytes through; proper CID decoding is out of scope here.
+			return &nopEncoder{}
 		case "UniGB-UCS2-H":
 			return &ucs2Encoder{}
 		default:
+			// Unknown named encoding (Symbol, ZapfDingbats, Identity-V, ...).
+			// None of these match PDFDocEncoding, so guessing a Latin table
+			// would produce wrong but plausible-looking text; pass through.
 			if DebugOn {
 				println("unknown encoding", enc.Name())
 			}
 			return &nopEncoder{}
 		}
 	case Dict:
-		return &dictEncoder{enc.Key("Differences")}
+		return newDictEncoder(enc, f.isSymbolic())
 	case Null:
-		return f.charmapEncoding()
+		return &byteEncoder{&pdfDocEncoding}
 	default:
 		if DebugOn {
 			println("unexpected encoding", enc.String())
@@ -246,46 +267,107 @@ func (f Font) getEncoder() TextEncoding {
 	}
 }
 
-func (f *Font) charmapEncoding() TextEncoding {
-	toUnicode := f.V.Key("ToUnicode")
-	if toUnicode.Kind() == Stream {
-		m := readCmap(toUnicode)
-		if m == nil {
-			return &nopEncoder{}
-		}
-		return m
-	}
-
-	return &byteEncoder{&pdfDocEncoding}
+// dictEncoder handles fonts with Encoding dictionaries containing
+// BaseEncoding and/or Differences arrays per PDF spec section 9.6.6.
+type dictEncoder struct {
+	table [256]rune // combined encoding table
 }
 
-type dictEncoder struct {
-	v Value
+// isSymbolic reports whether the font uses a symbolic character set
+// (PDF 32000-1:2008, section 9.8.2): the FontDescriptor's Symbolic flag
+// (bit 3) is set and its Nonsymbolic flag (bit 6) is not. Fonts without
+// a FontDescriptor are symbolic only if they are the standard Symbol or
+// ZapfDingbats fonts.
+func (f Font) isSymbolic() bool {
+	if flags := f.V.Key("FontDescriptor").Key("Flags"); flags.Kind() == Integer {
+		const symbolic, nonsymbolic = 1 << 2, 1 << 5
+		v := flags.Int64()
+		return v&symbolic != 0 && v&nonsymbolic == 0
+	}
+	baseFont := f.BaseFont()
+	if i := strings.IndexByte(baseFont, '+'); i == 6 { // subset tag, e.g. ABCDEF+Symbol
+		baseFont = baseFont[i+1:]
+	}
+	return baseFont == "Symbol" || baseFont == "ZapfDingbats"
+}
+
+// newDictEncoder creates an encoder from an Encoding dictionary.
+// It first applies BaseEncoding, then overlays any Differences. When
+// BaseEncoding is absent the base is StandardEncoding for nonsymbolic
+// fonts and the raw byte value for symbolic ones (see below).
+func newDictEncoder(enc Value, symbolic bool) *dictEncoder {
+	e := &dictEncoder{}
+
+	// Start with base encoding
+	baseEnc := enc.Key("BaseEncoding")
+	var baseTable *[256]rune
+	switch baseEnc.Name() {
+	case "WinAnsiEncoding":
+		baseTable = &winAnsiEncoding
+	case "MacRomanEncoding":
+		baseTable = &macRomanEncoding
+	case "StandardEncoding":
+		// Not one of the BaseEncoding values the spec allows (Table 114),
+		// but some producers write it; honor it rather than treating it
+		// as absent, which would give symbolic fonts the raw-byte base.
+		baseTable = &standardEncoding
+	case "MacExpertEncoding":
+		// No MacExpertEncoding table yet; its glyphs (small caps,
+		// fractions, ornaments) have no Latin equivalents, so any
+		// substitute is inaccurate. Fall back to StandardEncoding.
+		if DebugOn {
+			println("MacExpertEncoding not supported, falling back to StandardEncoding")
+		}
+		baseTable = &standardEncoding
+	default:
+		// Per PDF spec (9.6.6.1), if BaseEncoding is absent the base is
+		// StandardEncoding for nonsymbolic fonts and the font program's
+		// built-in encoding for symbolic ones. We don't parse font
+		// programs, so for symbolic fonts pass codes outside Differences
+		// through as their raw byte value, as this decoder did before
+		// BaseEncoding support; StandardEncoding would turn most of them
+		// (including all of 0x80-0x9F) into U+FFFD.
+		if symbolic {
+			baseTable = &identityEncoding
+		} else {
+			baseTable = &standardEncoding
+		}
+	}
+	copy(e.table[:], baseTable[:])
+
+	// Apply Differences array on top
+	// Format: [firstCode /name1 /name2 ... nextCode /nameN ...]
+	diff := enc.Key("Differences")
+	if diff.Kind() == Array {
+		code := -1
+		for j := 0; j < diff.Len(); j++ {
+			x := diff.Index(j)
+			if x.Kind() == Integer {
+				code = int(x.Int64())
+				continue
+			}
+			if x.Kind() == Name {
+				if code >= 0 && code < 256 {
+					if glyphName := x.Name(); glyphName == ".notdef" {
+						e.table[code] = noRune
+					} else if r := nameToRune[glyphName]; r != 0 {
+						e.table[code] = r
+					}
+				}
+				// Advance even when code is out of range so that a bad
+				// start code doesn't shift or drop later entries.
+				code++
+			}
+		}
+	}
+
+	return e
 }
 
 func (e *dictEncoder) Decode(raw string) (text string) {
 	r := make([]rune, 0, len(raw))
 	for i := 0; i < len(raw); i++ {
-		ch := rune(raw[i])
-		n := -1
-		for j := 0; j < e.v.Len(); j++ {
-			x := e.v.Index(j)
-			if x.Kind() == Integer {
-				n = int(x.Int64())
-				continue
-			}
-			if x.Kind() == Name {
-				if int(raw[i]) == n {
-					r := nameToRune[x.Name()]
-					if r != 0 {
-						ch = r
-						break
-					}
-				}
-				n++
-			}
-		}
-		r = append(r, ch)
+		r = append(r, e.table[raw[i]])
 	}
 	return string(r)
 }
@@ -345,6 +427,17 @@ type cmap struct {
 	bfchar  []bfchar
 }
 
+// appendDecoded appends the UTF-16BE decoding of s to r. A non-empty s that
+// decodes to nothing (e.g. a malformed single-byte destination) appends
+// noRune so the source character isn't silently deleted; a genuinely empty
+// destination still maps to nothing.
+func appendDecoded(r []rune, s string) []rune {
+	if d := utf16Decode(s); d != "" || s == "" {
+		return append(r, []rune(d)...)
+	}
+	return append(r, noRune)
+}
+
 func (m *cmap) Decode(raw string) (text string) {
 	var r []rune
 Parse:
@@ -356,7 +449,7 @@ Parse:
 					raw = raw[n:]
 					for _, bfchar := range m.bfchar { // check for matching bfchar
 						if len(bfchar.orig) == n && bfchar.orig == text {
-							r = append(r, []rune(utf16Decode(bfchar.repl))...)
+							r = appendDecoded(r, bfchar.repl)
 							continue Parse
 						}
 					}
@@ -364,18 +457,21 @@ Parse:
 						if len(bfrange.lo) == n && bfrange.lo <= text && text <= bfrange.hi {
 							if bfrange.dst.Kind() == String {
 								s := bfrange.dst.RawString()
+								if len(s) == 0 { // malformed: nothing to scale below
+									r = append(r, noRune)
+									continue Parse
+								}
 								if bfrange.lo != text { // value isn't at the beginning of the range so scale result
 									s = addOffset(s, beUint(text)-beUint(bfrange.lo))
 								}
-								r = append(r, []rune(utf16Decode(s))...)
+								r = appendDecoded(r, s)
 								continue Parse
 							}
 							if bfrange.dst.Kind() == Array {
 								n := text[len(text)-1] - bfrange.lo[len(bfrange.lo)-1]
 								v := bfrange.dst.Index(int(n))
 								if v.Kind() == String {
-									s := v.RawString()
-									r = append(r, []rune(utf16Decode(s))...)
+									r = appendDecoded(r, v.RawString())
 									continue Parse
 								}
 								if DebugOn {
@@ -404,10 +500,40 @@ Parse:
 	return string(r)
 }
 
-func readCmap(toUnicode Value) *cmap {
+func readCmap(toUnicode Value) (cm *cmap) {
+	defer func() {
+		if e := recover(); e != nil {
+			// Interpret panics on malformed PostScript (unmatched end,
+			// begin on a non-dict, currentdict with no dictionary, ...).
+			// Treat that as a parse failure so the caller falls back to
+			// /Encoding instead of crashing text extraction.
+			if DebugOn {
+				println("readCmap:", fmt.Sprint(e))
+			}
+			cm = nil
+		}
+	}()
 	n := -1
+	section := "" // begin/end section currently open, if any
+	base := 0     // stack depth when the current section began
 	var m cmap
 	ok := true
+	// badSection reports (and rejects) an end operator whose section
+	// doesn't match the innermost begin, or whose declared entry count is
+	// negative or larger than the operands pushed since the begin (each
+	// entry pops `operands` values). The count comes from untrusted input,
+	// so looping on it unchecked lets a tiny stream allocate unbounded
+	// entries from Pop's zero values.
+	badSection := func(stk *Stack, want string, operands int) bool {
+		if section != want || n < 0 || n > (stk.Len()-base)/operands {
+			if DebugOn {
+				println("bad", want, "section")
+			}
+			ok = false
+			return true
+		}
+		return false
+	}
 	Interpret(toUnicode, func(stk *Stack, op string) {
 		if !ok {
 			return
@@ -423,17 +549,15 @@ func readCmap(toUnicode Value) *cmap {
 			stk.Pop()
 		case "begincodespacerange":
 			n = int(stk.Pop().Int64())
+			base = stk.Len()
+			section = "codespacerange"
 		case "endcodespacerange":
-			if n < 0 {
-				if DebugOn {
-					println("missing begincodespacerange")
-				}
-				ok = false
+			if badSection(stk, "codespacerange", 2) {
 				return
 			}
 			for i := 0; i < n; i++ {
 				hi, lo := stk.Pop().RawString(), stk.Pop().RawString()
-				if len(lo) == 0 || len(lo) != len(hi) {
+				if len(lo) == 0 || len(lo) > 4 || len(lo) != len(hi) {
 					if DebugOn {
 						println("bad codespace range")
 					}
@@ -442,27 +566,33 @@ func readCmap(toUnicode Value) *cmap {
 				}
 				m.space[len(lo)-1] = append(m.space[len(lo)-1], byteRange{lo, hi})
 			}
-			n = -1
+			n, section = -1, ""
 		case "beginbfchar":
 			n = int(stk.Pop().Int64())
+			base = stk.Len()
+			section = "bfchar"
 		case "endbfchar":
-			if n < 0 {
-				panic("missing beginbfchar")
+			if badSection(stk, "bfchar", 2) {
+				return
 			}
 			for i := 0; i < n; i++ {
 				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfchar = append(m.bfchar, bfchar{orig, repl})
 			}
+			n, section = -1, ""
 		case "beginbfrange":
 			n = int(stk.Pop().Int64())
+			base = stk.Len()
+			section = "bfrange"
 		case "endbfrange":
-			if n < 0 {
-				panic("missing beginbfrange")
+			if badSection(stk, "bfrange", 3) {
+				return
 			}
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()
 				m.bfrange = append(m.bfrange, bfrange{srcLo, srcHi, dst})
 			}
+			n, section = -1, ""
 		case "defineresource":
 			stk.Pop().Name() // category
 			value := stk.Pop()
@@ -474,10 +604,26 @@ func readCmap(toUnicode Value) *cmap {
 			}
 		}
 	})
-	if !ok {
+	if !ok || section != "" {
+		// A non-empty section means the stream ended inside an
+		// unterminated begincodespacerange/beginbfchar/beginbfrange
+		// section, so the CMap is truncated and can't be trusted.
 		return nil
 	}
-	return &m
+	if len(m.bfchar) == 0 && len(m.bfrange) == 0 {
+		// No mapping data at all: report failure so the caller falls
+		// back to the font's /Encoding instead of decoding every code
+		// to the replacement character.
+		return nil
+	}
+	for _, space := range m.space {
+		if len(space) > 0 {
+			return &m
+		}
+	}
+	// Mappings without any codespace range can never match a code, which
+	// would also decode everything to the replacement character.
+	return nil
 }
 
 type matrix [3][3]float64
