@@ -636,6 +636,16 @@ func (v Value) RawString() string {
 	return x
 }
 
+// RawBytes returns v's value as byte slice.
+// If v.Kind() != String, RawBytes returns nil.
+func (v Value) RawBytes() []byte {
+	x, ok := v.data.(string)
+	if !ok {
+		return nil
+	}
+	return []byte(x)
+}
+
 // Text returns v's string value interpreted as a “text string” (defined in the PDF spec)
 // and converted to UTF-8.
 // If v.Kind() != String, Text returns the empty string.
