@@ -87,8 +87,14 @@ func TestCryptKeyDeterministicAndSaltAware(t *testing.T) {
 	if k4 := cryptKey([]byte("secret"), false, objptr{id: 2, gen: 0}); bytes.Equal(k1, k4) {
 		t.Fatal("cryptKey should differ when object id differs")
 	}
-	if len(k1) != 16 {
-		t.Fatalf("md5-based key length = %d, want 16", len(k1))
+	// PDF 32000-1:2008 Algorithm 1 step e: the object key is the first
+	// min(n/8+5, 16) bytes of the digest, so 11 for this 6-byte key and 16
+	// only once the document key is 11 bytes or longer.
+	if len(k1) != 11 {
+		t.Fatalf("object key length for a 6-byte key = %d, want 11", len(k1))
+	}
+	if k5 := cryptKey([]byte("0123456789abcdef"), false, objptr{id: 1, gen: 0}); len(k5) != 16 {
+		t.Fatalf("object key length for a 16-byte key = %d, want 16", len(k5))
 	}
 }
 
