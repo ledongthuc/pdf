@@ -177,14 +177,14 @@ func TestEncoderFallbacksWithoutToUnicode(t *testing.T) {
 			want: "01’",
 		},
 		{
-			// A symbolic TrueType font with no Encoding entry uses its
-			// built-in (cmap) encoding, which we can't read; it decodes as
-			// PDFDocEncoding, as before this change.
-			name: "symbolic TrueType without Encoding",
+			// A TrueType font with no Encoding entry uses its built-in
+			// (cmap) encoding, which we can't read; it decodes as
+			// PDFDocEncoding, as before this change. isSymbolic is not
+			// consulted on this path, so the font's flags don't matter.
+			name: "TrueType without Encoding",
 			font: dict{
-				name("Subtype"):        name("TrueType"),
-				name("BaseFont"):       name("Wingdings-Regular"),
-				name("FontDescriptor"): dict{name("Flags"): int64(4)},
+				name("Subtype"):  name("TrueType"),
+				name("BaseFont"): name("Wingdings-Regular"),
 			},
 			raw:  "Ab",
 			want: "Ab",
