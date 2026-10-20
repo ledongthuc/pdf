@@ -306,6 +306,11 @@ func newDictEncoder(enc Value, symbolic bool) *dictEncoder {
 		baseTable = &winAnsiEncoding
 	case "MacRomanEncoding":
 		baseTable = &macRomanEncoding
+	case "StandardEncoding":
+		// Not one of the BaseEncoding values the spec allows (Table 114),
+		// but some producers write it; honor it rather than treating it
+		// as absent, which would give symbolic fonts the raw-byte base.
+		baseTable = &standardEncoding
 	case "MacExpertEncoding":
 		// No MacExpertEncoding table yet; its glyphs (small caps,
 		// fractions, ornaments) have no Latin equivalents, so any

@@ -115,6 +115,16 @@ func TestSymbolicFontDifferencesWithoutBaseEncoding(t *testing.T) {
 	if got := e.Decode("\x80"); got != "€" {
 		t.Fatalf("Decode(0x80) = %q, want %q (explicit WinAnsi base)", got, "€")
 	}
+
+	// An explicit /StandardEncoding base (written by some producers though
+	// not a spec-allowed BaseEncoding value) is honored too, rather than
+	// treated as absent.
+	e = newDictEncoder(testValue(dict{
+		name("BaseEncoding"): name("StandardEncoding"),
+	}), true)
+	if got := e.Decode("'"); got != "’" {
+		t.Fatalf("Decode(0x27) = %q, want %q (explicit StandardEncoding base)", got, "’")
+	}
 }
 
 func TestFontIsSymbolic(t *testing.T) {
