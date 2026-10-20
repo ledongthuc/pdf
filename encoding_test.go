@@ -208,6 +208,41 @@ func TestEncoderFallbacksWithoutToUnicode(t *testing.T) {
 	}
 }
 
+// TestIdentityHMalformedToUnicodePassesThrough verifies that a Type0
+// Identity-H font whose ToUnicode CMap is malformed (endbfchar without
+// beginbfchar) falls back to passing the raw 2-byte codes through, rather
+// than failing the page or decoding each byte as PDFDocEncoding (which
+// would turn 0x92 into U+2122).
+func TestIdentityHMalformedToUnicodePassesThrough(t *testing.T) {
+	toUnicode := "begincmap\n" +
+		"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n" +
+		"endbfchar\n" +
+		"endcmap"
+
+	pdfData := fontPDF("/Subtype /Type0 /BaseFont /ABCDEF+ArialMT /Encoding /Identity-H", "<00240092>", toUnicode)
+	reader, err := NewReader(bytes.NewReader(pdfData), int64(len(pdfData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := reader.Page(1)
+
+	font := page.Font("F1")
+	if got, want := font.Encoder().Decode("\x00\x24\x00\x92"), "\x00\x24\x00\x92"; got != want {
+		t.Fatalf("Decode = %q, want %q (raw bytes)", got, want)
+	}
+
+	// GetPlainText re-encodes decoded text as UTF-8, so the passed-through
+	// 0x92 byte (not valid UTF-8 on its own) comes out as U+FFFD; the point
+	// is that the page still extracts instead of returning an error.
+	text, err := page.GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("GetPlainText returned an error (want raw passthrough): %v", err)
+	}
+	if got, want := strings.TrimSpace(text), "\x00$\x00\ufffd"; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}
+
 // TestToUnicodePrecedence verifies that a font's /ToUnicode CMap takes
 // precedence over its /Encoding entry (PDF 32000-1:2008, section 9.10.2):
 // the CMap remaps 'A' to 'Z' while /Encoding is WinAnsiEncoding, so
@@ -461,6 +496,12 @@ func TestCmapDecodeEmptyBFRangeDst(t *testing.T) {
 // /Encoding /WinAnsiEncoding and the given /ToUnicode stream, whose page
 // draws the single character "A".
 func simpleFontPDF(toUnicode string) []byte {
+	return fontPDF("/Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding", "(A)", toUnicode)
+}
+
+// fontPDF builds a one-page PDF whose page shows the string operand text
+// in a single font with the given dictionary entries and /ToUnicode stream.
+func fontPDF(fontEntries, text, toUnicode string) []byte {
 	var pdf bytes.Buffer
 	pdf.WriteString("%PDF-1.4\n")
 	offsets := make([]int, 7)
@@ -475,9 +516,9 @@ func simpleFontPDF(toUnicode string) []byte {
 	writeObject(1, "<< /Type /Catalog /Pages 2 0 R >>")
 	writeObject(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
 	writeObject(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 6 0 R >> >> /Contents 4 0 R >>")
-	writeStream(4, "", "BT /F1 12 Tf (A) Tj ET")
+	writeStream(4, "", "BT /F1 12 Tf "+text+" Tj ET")
 	writeStream(5, "", toUnicode)
-	writeObject(6, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 5 0 R >>")
+	writeObject(6, "<< /Type /Font "+fontEntries+" /ToUnicode 5 0 R >>")
 
 	xrefOffset := pdf.Len()
 	pdf.WriteString("xref\n0 7\n0000000000 65535 f \n")
