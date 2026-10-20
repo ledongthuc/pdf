@@ -1,0 +1,89 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 175 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+<212223242526272628292A2B292C2D2E2F2F29303132> Tj
+ET
+BT
+/F2 12 Tf
+72 700 Td
+<446566656E64616E747392207265706C7920962066696C65642001042F03022F0207> Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /TrueType /BaseFont /AAAAAA+TimesNewRomanPSMT /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>
+endobj
+6 0 obj
+<< /Length 536 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<00> <FF>
+endcodespacerange
+18 beginbfchar
+<21> <0043>
+<22> <0061>
+<23> <0073>
+<24> <0065>
+<25> <0020>
+<26> <0031>
+<27> <003A>
+<28> <0035>
+<29> <002D>
+<2A> <0063>
+<2B> <0076>
+<2C> <0030>
+<2D> <0037>
+<2E> <0034>
+<2F> <0033>
+<30> <004C>
+<31> <0041>
+<32> <0050>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /BBBBBB+Times-Roman /FontDescriptor 8 0 R /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /zero /one /two /three /four /five /six /seven /eight /nine] >> >>
+endobj
+8 0 obj
+<< /Type /FontDescriptor /FontName /BBBBBB+Times-Roman /Flags 34 /FontBBox [-168 -218 1000 898] /ItalicAngle 0 /Ascent 683 /Descent -217 /CapHeight 662 /StemV 84 >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000000483 00000 n 
+0000000615 00000 n 
+0000001202 00000 n 
+0000001443 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+1623
+%%EOF
