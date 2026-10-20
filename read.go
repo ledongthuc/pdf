@@ -869,19 +869,14 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 		if err != nil {
 			panic(err)
 		}
-		pred := param.Key("Predictor")
-		if pred.Kind() == Null {
+		pred, rawLen, bpp := decodeParams(param)
+		switch pred {
+		default: // 1
 			return zr
-		}
-		columns := param.Key("Columns").Int64()
-		switch pred.Int64() {
-		default:
-			if DebugOn {
-				fmt.Println("unknown predictor", pred)
-			}
-			panic("pred")
-		case 12:
-			return &pngUpReader{r: zr, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}
+		case 2:
+			return &tiffPredictorReader{r: zr, bpp: int(bpp), row: make([]byte, rawLen)}
+		case 10, 11, 12, 13, 14, 15:
+			return &pngPredictorReader{r: zr, bpp: int(bpp), hist: make([]byte, rawLen), tmp: make([]byte, 1+rawLen)}
 		}
 	case "ASCII85Decode":
 		cleanASCII85 := newAlphaReader(rd)
@@ -899,14 +894,91 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 	}
 }
 
-type pngUpReader struct {
+func decodeParams(param Value) (predictor, rawLen, bpp int64) {
+	if v := param.Key("Predictor"); v.Kind() == Null {
+		predictor = 1
+	} else {
+		predictor = v.Int64()
+	}
+	switch predictor {
+	case 1, 2, 10, 11, 12, 13, 14, 15:
+	default:
+		panic(fmt.Errorf("Predictor %d is currently unsupported", predictor))
+	}
+
+	var colors int64
+	if v := param.Key("Colors"); v.Kind() == Null {
+		colors = 1
+	} else {
+		colors = v.Int64()
+	}
+	switch colors {
+	case 1, 3:
+	default:
+		panic(fmt.Errorf("Colors %d is currently unsupported", colors))
+	}
+
+	var bpc int64
+	if v := param.Key("BitsPerComponent"); v.Kind() == Null {
+		bpc = 8
+	} else {
+		bpc = v.Int64()
+	}
+	switch bpc {
+	case 8: // 1, 2, 4, 16
+	default:
+		panic(fmt.Errorf("BitsPerComponent %d is currently unsupported", bpc))
+	}
+	bpp = colors * bpc / 8 // bytes per pixel
+
+	var columns int64
+	if v := param.Key("Columns"); v.Kind() == Null {
+		columns = 1
+	} else {
+		columns = v.Int64()
+	}
+	rawLen = columns * bpp
+	return
+}
+
+type tiffPredictorReader struct {
 	r    io.Reader
+	bpp  int
+	row  []byte
+	pend []byte
+}
+
+func (r *tiffPredictorReader) Read(b []byte) (int, error) {
+	n := 0
+	for len(b) > 0 {
+		if len(r.pend) > 0 {
+			m := copy(b, r.pend)
+			n += m
+			b = b[m:]
+			r.pend = r.pend[m:]
+			continue
+		}
+		_, err := io.ReadFull(r.r, r.row)
+		if err != nil {
+			return n, err
+		}
+		for i := r.bpp; i < len(r.row); i++ {
+			r.row[i] += r.row[i-r.bpp]
+		}
+		r.pend = r.row
+	}
+	return n, nil
+}
+
+type pngPredictorReader struct {
+	r    io.Reader
+	bpp  int
 	hist []byte
 	tmp  []byte
 	pend []byte
 }
 
-func (r *pngUpReader) Read(b []byte) (int, error) {
+func (r *pngPredictorReader) Read(b []byte) (int, error) {
 	n := 0
 	for len(b) > 0 {
 		if len(r.pend) > 0 {
@@ -920,15 +992,71 @@ func (r *pngUpReader) Read(b []byte) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		if r.tmp[0] != 2 {
-			return n, fmt.Errorf("malformed PNG-Up encoding")
+
+		switch r.tmp[0] {
+		case 0: // None
+			copy(r.hist, r.tmp[1:])
+		case 1: // Sub
+			for i := range r.hist {
+				if i < r.bpp {
+					r.hist[i] = r.tmp[i+1]
+				} else {
+					r.hist[i] = r.tmp[i+1] + r.hist[i-r.bpp]
+				}
+			}
+		case 2: // Up
+			for i := range r.hist {
+				r.hist[i] += r.tmp[i+1]
+			}
+		case 3: // Average
+			for i := range r.hist {
+				var a byte
+				if i >= r.bpp {
+					a = r.hist[i-r.bpp]
+				}
+				r.hist[i] = r.tmp[i+1] + (a+r.hist[i])/2
+			}
+		case 4: // Paeth
+			for i := range r.hist {
+				var a, b, c byte
+				if i >= r.bpp {
+					a = r.tmp[1+i-r.bpp]
+					c = r.hist[i-r.bpp]
+				}
+				b = r.hist[i]
+				r.tmp[i+1] = r.tmp[i+1] + paeth(a, b, c)
+			}
+			copy(r.hist, r.tmp[1:])
+		default:
+			return n, fmt.Errorf("malformed PNG predictor")
 		}
-		for i, b := range r.tmp {
-			r.hist[i] += b
-		}
-		r.pend = r.hist[1:]
+		r.pend = r.hist
 	}
 	return n, nil
+}
+
+func paeth(a, b, c byte) byte {
+	pc := int(c)
+	pa := int(b) - pc
+	pb := int(a) - pc
+	pc = abs(pa + pb)
+	pa = abs(pa)
+	pb = abs(pb)
+	switch {
+	case pa <= pb && pa <= pc:
+		return a
+	case pb <= pc:
+		return b
+	default:
+		return c
+	}
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 var passwordPad = []byte{

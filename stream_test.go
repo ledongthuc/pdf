@@ -24,11 +24,62 @@ func TestValueReaderOnNonStream(t *testing.T) {
 	}
 }
 
-func TestPNGUpReader(t *testing.T) {
+func TestTiffPredictorReader(t *testing.T) {
+	// One raw of width 2 encoded with the TIFF predictor.
+	// Component 1: raw [5, 10]; Component 2: raw [6, 11] (differences from the previous component).
+	input := []byte{5, 10, 1, 1}
+	r := &tiffPredictorReader{r: bytes.NewReader(input), bpp: 2, row: make([]byte, 4)}
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// row accumulates: after row1 [5,10,6,11].
+	want := []byte{5, 10, 6, 11}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded = %v, want %v", got, want)
+	}
+}
+
+func TestPNGPredictorReaderNone(t *testing.T) {
+	// Two rows of width 2 encoded with the PNG "None" predictor (filter byte 0).
+	// Row 1: raw [5, 10]; Row 2: raw [6, 11] (no differences).
+	input := []byte{0, 5, 10, 0, 6, 11}
+	r := &pngPredictorReader{r: bytes.NewReader(input), bpp: 1, hist: make([]byte, 2), tmp: make([]byte, 3)}
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// hist accumulates: after row1 [5,10]; after row2 [6,11].
+	want := []byte{5, 10, 6, 11}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded = %v, want %v", got, want)
+	}
+}
+
+func TestPNGPredictorReaderSub(t *testing.T) {
+	// One raw of width 2 encoded with the PNG "Sub" predictor (filter byte 1).
+	// Component 1: raw [5, 10]; Component 2: raw [6, 11] (differences from the previous component).
+	input := []byte{1, 5, 10, 1, 1}
+	r := &pngPredictorReader{r: bytes.NewReader(input), bpp: 2, hist: make([]byte, 4), tmp: make([]byte, 5)}
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// hist accumulates: after row1 [5,10,6,11].
+	want := []byte{5, 10, 6, 11}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded = %v, want %v", got, want)
+	}
+}
+
+func TestPNGPredictorReaderUp(t *testing.T) {
 	// Two rows of width 2 encoded with the PNG "Up" predictor (filter byte 2).
 	// Row 1: raw [5, 10]; Row 2: raw [1, 1] (differences from the previous row).
 	input := []byte{2, 5, 10, 2, 1, 1}
-	r := &pngUpReader{r: bytes.NewReader(input), hist: make([]byte, 3), tmp: make([]byte, 3)}
+	r := &pngPredictorReader{r: bytes.NewReader(input), bpp: 1, hist: make([]byte, 2), tmp: make([]byte, 3)}
 
 	got, err := io.ReadAll(r)
 	if err != nil {
@@ -41,12 +92,46 @@ func TestPNGUpReader(t *testing.T) {
 	}
 }
 
+func TestPNGPredictorReaderAverage(t *testing.T) {
+	// Two rows of width 2 encoded with the PNG "Average" predictor (filter byte 3).
+	// Row 1: raw [5, 10]; Row 2: raw [1, 1] (differences from the previous row and previous component).
+	input := []byte{3, 5, 10, 3, 1, 1}
+	r := &pngPredictorReader{r: bytes.NewReader(input), bpp: 1, hist: make([]byte, 2), tmp: make([]byte, 3)}
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// hist accumulates: after row1 [5+(0+0)/2, 10+(5+0)/2] = [5,12]; after row2 [1+(0+5)/2, 1+(3+12)/2] = [3,8].
+	want := []byte{5, 12, 3, 8}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded = %v, want %v", got, want)
+	}
+}
+
+func TestPNGPredictorReaderPaeth(t *testing.T) {
+	// Two rows of width 2 encoded with the PNG "Paeth" predictor (filter byte 4).
+	// Row 1: raw [5, 10]; Row 2: raw [1, 1] (differences from the left, upper and upper-left component).
+	input := []byte{4, 5, 10, 4, 1, 1}
+	r := &pngPredictorReader{r: bytes.NewReader(input), bpp: 1, hist: make([]byte, 2), tmp: make([]byte, 3)}
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// hist accumulates: after row1 [5,10] => [5,15]; after row2 [1,1] => [6,16]
+	want := []byte{5, 15, 6, 16}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded = %v, want %v", got, want)
+	}
+}
+
 func TestPNGUpReaderRejectsBadFilter(t *testing.T) {
-	input := []byte{1, 5, 10} // filter byte 1 is not "Up"
-	r := &pngUpReader{r: bytes.NewReader(input), hist: make([]byte, 3), tmp: make([]byte, 3)}
+	input := []byte{5, 5, 10} // filter byte 5 is not a valid PNG predictor
+	r := &pngPredictorReader{r: bytes.NewReader(input), bpp: 1, hist: make([]byte, 2), tmp: make([]byte, 3)}
 	_, err := io.ReadAll(r)
-	if err == nil || !strings.Contains(err.Error(), "malformed PNG-Up") {
-		t.Fatalf("err = %v, want malformed PNG-Up error", err)
+	if err == nil || !strings.Contains(err.Error(), "malformed PNG predictor") {
+		t.Fatalf("err = %v, want malformed PNG predictor error", err)
 	}
 }
 
