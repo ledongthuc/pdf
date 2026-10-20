@@ -68,7 +68,7 @@ func TestDictEncoder(t *testing.T) {
 	// Differences array: code 65 -> /Alpha (0x0391).
 	e := newDictEncoder(testValue(dict{
 		name("Differences"): array{int64(65), name("Alpha")},
-	}))
+	}), false)
 	if got := e.Decode("A"); got != "\u0391" {
 		t.Fatalf("Decode(A) = %q, want %q", got, "\u0391")
 	}
@@ -76,7 +76,7 @@ func TestDictEncoder(t *testing.T) {
 	// Unknown glyph name keeps the base-encoding value.
 	e2 := newDictEncoder(testValue(dict{
 		name("Differences"): array{int64(65), name("NotAGlyphName")},
-	}))
+	}), false)
 	if got := e2.Decode("A"); got != "A" {
 		t.Fatalf("Decode(A) = %q, want %q (fallback)", got, "A")
 	}

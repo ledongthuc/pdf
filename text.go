@@ -160,6 +160,15 @@ var macRomanEncoding = [256]rune{
 	0x00af, 0x02d8, 0x02d9, 0x02da, 0x00b8, 0x02dd, 0x02db, 0x02c7,
 }
 
+// identityEncoding maps each byte to the rune with the same value. It is
+// the fallback base for symbolic fonts whose built-in encoding is unknown.
+var identityEncoding = func() (t [256]rune) {
+	for i := range t {
+		t[i] = rune(i)
+	}
+	return t
+}()
+
 // See PDF 32000-1:2008, Table D.2 (StandardEncoding column)
 var standardEncoding = [256]rune{
 	noRune, noRune, noRune, noRune, noRune, noRune, noRune, noRune,

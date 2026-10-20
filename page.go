@@ -256,7 +256,7 @@ func (f Font) getEncoder() TextEncoding {
 			return &nopEncoder{}
 		}
 	case Dict:
-		return newDictEncoder(enc)
+		return newDictEncoder(enc, f.isSymbolic())
 	case Null:
 		return &byteEncoder{&pdfDocEncoding}
 	default:
@@ -273,10 +273,29 @@ type dictEncoder struct {
 	table [256]rune // combined encoding table
 }
 
+// isSymbolic reports whether the font uses a symbolic character set
+// (PDF 32000-1:2008, section 9.8.2): the FontDescriptor's Symbolic flag
+// (bit 3) is set and its Nonsymbolic flag (bit 6) is not. Fonts without
+// a FontDescriptor are symbolic only if they are the standard Symbol or
+// ZapfDingbats fonts.
+func (f Font) isSymbolic() bool {
+	if flags := f.V.Key("FontDescriptor").Key("Flags"); flags.Kind() == Integer {
+		const symbolic, nonsymbolic = 1 << 2, 1 << 5
+		v := flags.Int64()
+		return v&symbolic != 0 && v&nonsymbolic == 0
+	}
+	baseFont := f.BaseFont()
+	if i := strings.IndexByte(baseFont, '+'); i == 6 { // subset tag, e.g. ABCDEF+Symbol
+		baseFont = baseFont[i+1:]
+	}
+	return baseFont == "Symbol" || baseFont == "ZapfDingbats"
+}
+
 // newDictEncoder creates an encoder from an Encoding dictionary.
-// It first applies BaseEncoding (defaulting to StandardEncoding),
-// then overlays any Differences.
-func newDictEncoder(enc Value) *dictEncoder {
+// It first applies BaseEncoding, then overlays any Differences. When
+// BaseEncoding is absent the base is StandardEncoding for nonsymbolic
+// fonts and the raw byte value for symbolic ones (see below).
+func newDictEncoder(enc Value, symbolic bool) *dictEncoder {
 	e := &dictEncoder{}
 
 	// Start with base encoding
@@ -296,11 +315,18 @@ func newDictEncoder(enc Value) *dictEncoder {
 		}
 		baseTable = &standardEncoding
 	default:
-		// Per PDF spec, if BaseEncoding is absent the font's built-in
-		// encoding applies, which for nonsymbolic fonts is usually
-		// StandardEncoding. We don't parse font programs, so use
-		// StandardEncoding as the approximation.
-		baseTable = &standardEncoding
+		// Per PDF spec (9.6.6.1), if BaseEncoding is absent the base is
+		// StandardEncoding for nonsymbolic fonts and the font program's
+		// built-in encoding for symbolic ones. We don't parse font
+		// programs, so for symbolic fonts pass codes outside Differences
+		// through as their raw byte value, as this decoder did before
+		// BaseEncoding support; StandardEncoding would turn most of them
+		// (including all of 0x80-0x9F) into U+FFFD.
+		if symbolic {
+			baseTable = &identityEncoding
+		} else {
+			baseTable = &standardEncoding
+		}
 	}
 	copy(e.table[:], baseTable[:])
 

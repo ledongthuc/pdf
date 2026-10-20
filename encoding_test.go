@@ -12,7 +12,7 @@ func TestNewDictEncoderBaseAndDifferences(t *testing.T) {
 	e := newDictEncoder(testValue(dict{
 		name("BaseEncoding"): name("WinAnsiEncoding"),
 		name("Differences"):  array{int64(65), name("Alpha"), name("Beta")},
-	}))
+	}), false)
 
 	// Codes covered by Differences: 65 -> /Alpha, 66 -> /Beta (consecutive names).
 	if got := e.Decode("AB"); got != "ΑΒ" {
@@ -30,7 +30,7 @@ func TestNewDictEncoderDifferencesGap(t *testing.T) {
 	e := newDictEncoder(testValue(dict{
 		name("BaseEncoding"): name("WinAnsiEncoding"),
 		name("Differences"):  array{int64(65), name("Alpha"), int64(67), name("Beta")},
-	}))
+	}), false)
 	if got := e.Decode("ABC"); got != "ΑBΒ" {
 		t.Fatalf("Decode(ABC) = %q, want %q (66 keeps base value)", got, "ΑBΒ")
 	}
@@ -41,7 +41,7 @@ func TestNewDictEncoderOutOfRangeCode(t *testing.T) {
 	e := newDictEncoder(testValue(dict{
 		name("BaseEncoding"): name("WinAnsiEncoding"),
 		name("Differences"):  array{int64(300), name("Alpha"), int64(-1), name("Beta"), int64(65), name("Gamma")},
-	}))
+	}), false)
 	if got := e.Decode("A"); got != "Γ" {
 		t.Fatalf("Decode(A) = %q, want %q (valid entry after out-of-range ones)", got, "Γ")
 	}
@@ -51,7 +51,7 @@ func TestNewDictEncoderOutOfRangeCode(t *testing.T) {
 	e2 := newDictEncoder(testValue(dict{
 		name("BaseEncoding"): name("WinAnsiEncoding"),
 		name("Differences"):  array{int64(-1), name("Alpha"), name("Beta")},
-	}))
+	}), false)
 	if got := e2.Decode("\x00"); got != "Β" {
 		t.Fatalf("Decode(0x00) = %q, want %q (resynced after out-of-range start)", got, "Β")
 	}
@@ -62,7 +62,7 @@ func TestNewDictEncoderNotdef(t *testing.T) {
 	e := newDictEncoder(testValue(dict{
 		name("BaseEncoding"): name("WinAnsiEncoding"),
 		name("Differences"):  array{int64(65), name(".notdef")},
-	}))
+	}), false)
 	if got := e.Decode("A"); got != string(noRune) {
 		t.Fatalf("Decode(A) = %q, want %q (noRune for /.notdef)", got, string(noRune))
 	}
@@ -71,12 +71,73 @@ func TestNewDictEncoderNotdef(t *testing.T) {
 func TestNewDictEncoderDefaultBaseIsStandard(t *testing.T) {
 	// Without BaseEncoding the default is StandardEncoding, where 0x27 is
 	// quoteright (U+2019), not the apostrophe of PDFDocEncoding/WinAnsi.
-	e := newDictEncoder(testValue(dict{}))
+	e := newDictEncoder(testValue(dict{}), false)
 	if got := e.Decode("'"); got != "’" {
 		t.Fatalf("Decode(0x27) = %q, want %q (quoteright in StandardEncoding)", got, "’")
 	}
 	if got := e.Decode("A"); got != "A" {
 		t.Fatalf("Decode(A) = %q, want %q", got, "A")
+	}
+}
+
+// TestSymbolicFontDifferencesWithoutBaseEncoding covers a symbolic font
+// whose Encoding dictionary has Differences but no BaseEncoding. Per PDF
+// 32000-1:2008, 9.6.6.1, the implicit base is the font's built-in encoding,
+// not StandardEncoding, so codes outside Differences (including 0x80-0x9F,
+// which StandardEncoding leaves undefined) keep their raw byte value
+// instead of becoming U+FFFD.
+func TestSymbolicFontDifferencesWithoutBaseEncoding(t *testing.T) {
+	font := Font{V: testValue(dict{
+		name("Type"):     name("Font"),
+		name("Subtype"):  name("TrueType"),
+		name("BaseFont"): name("ABCDEF+Wingdings"),
+		name("FontDescriptor"): dict{
+			name("Flags"): int64(4), // Symbolic
+		},
+		name("Encoding"): dict{
+			name("Differences"): array{int64(65), name("Alpha")},
+		},
+	})}
+
+	if got, want := font.Encoder().Decode("A'\x80\x92\x9f"), "Α'\u0080\u0092\u009f"; got != want {
+		t.Fatalf("Decode = %q, want %q (Differences, then raw bytes)", got, want)
+	}
+
+	// The same font flagged nonsymbolic uses StandardEncoding as its base.
+	font.V.data.(dict)[name("FontDescriptor")] = dict{name("Flags"): int64(32)}
+	font.enc = nil
+	if got, want := font.Encoder().Decode("A'\x80"), "Α’"+string(noRune); got != want {
+		t.Fatalf("nonsymbolic Decode = %q, want %q (StandardEncoding base)", got, want)
+	}
+
+	// An explicit BaseEncoding is honored even for symbolic fonts.
+	e := newDictEncoder(testValue(dict{
+		name("BaseEncoding"): name("WinAnsiEncoding"),
+	}), true)
+	if got := e.Decode("\x80"); got != "€" {
+		t.Fatalf("Decode(0x80) = %q, want %q (explicit WinAnsi base)", got, "€")
+	}
+}
+
+func TestFontIsSymbolic(t *testing.T) {
+	tests := []struct {
+		name string
+		font dict
+		want bool
+	}{
+		{"symbolic flag", dict{name("FontDescriptor"): dict{name("Flags"): int64(4)}}, true},
+		{"nonsymbolic flag", dict{name("FontDescriptor"): dict{name("Flags"): int64(32)}}, false},
+		{"both flags", dict{name("FontDescriptor"): dict{name("Flags"): int64(36)}}, false},
+		{"no flags", dict{name("FontDescriptor"): dict{name("Flags"): int64(0)}}, false},
+		{"flags win over name", dict{name("BaseFont"): name("Symbol"), name("FontDescriptor"): dict{name("Flags"): int64(32)}}, false},
+		{"standard Symbol", dict{name("BaseFont"): name("Symbol")}, true},
+		{"subset ZapfDingbats", dict{name("BaseFont"): name("ABCDEF+ZapfDingbats")}, true},
+		{"Helvetica", dict{name("BaseFont"): name("Helvetica")}, false},
+	}
+	for _, tt := range tests {
+		if got := (Font{V: testValue(tt.font)}).isSymbolic(); got != tt.want {
+			t.Errorf("%s: isSymbolic() = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 
