@@ -139,6 +139,65 @@ func TestFontIsSymbolic(t *testing.T) {
 	}
 }
 
+// TestEncoderFallbacksWithoutToUnicode pins down how fonts without a
+// ToUnicode CMap are decoded, for font kinds the BaseEncoding/symbolic
+// changes could affect.
+func TestEncoderFallbacksWithoutToUnicode(t *testing.T) {
+	tests := []struct {
+		name string
+		font dict
+		raw  string
+		want string
+	}{
+		{
+			// No byte-to-rune table applies to 2-byte CIDs, so the raw
+			// bytes pass through rather than being decoded one byte at a
+			// time as PDFDocEncoding.
+			name: "Type0 Identity-H",
+			font: dict{
+				name("Subtype"):  name("Type0"),
+				name("BaseFont"): name("ABCDEF+ArialMT"),
+				name("Encoding"): name("Identity-H"),
+			},
+			raw:  "\x00\x24\x00\x92",
+			want: "\x00\x24\x00\x92",
+		},
+		{
+			// Type3 fonts have no FontDescriptor flags to consult, so they
+			// are nonsymbolic: Differences codes decode by glyph name and
+			// the rest use StandardEncoding.
+			name: "Type3 Differences only",
+			font: dict{
+				name("Subtype"): name("Type3"),
+				name("Encoding"): dict{
+					name("Differences"): array{int64(1), name("zero"), name("one")},
+				},
+			},
+			raw:  "\x01\x02'",
+			want: "01’",
+		},
+		{
+			// A symbolic TrueType font with no Encoding entry uses its
+			// built-in (cmap) encoding, which we can't read; it decodes as
+			// PDFDocEncoding, as before this change.
+			name: "symbolic TrueType without Encoding",
+			font: dict{
+				name("Subtype"):        name("TrueType"),
+				name("BaseFont"):       name("Wingdings-Regular"),
+				name("FontDescriptor"): dict{name("Flags"): int64(4)},
+			},
+			raw:  "Ab",
+			want: "Ab",
+		},
+	}
+	for _, tt := range tests {
+		f := &Font{V: testValue(tt.font)}
+		if got := f.Encoder().Decode(tt.raw); got != tt.want {
+			t.Errorf("%s: Decode(%q) = %q, want %q", tt.name, tt.raw, got, tt.want)
+		}
+	}
+}
+
 // TestToUnicodePrecedence verifies that a font's /ToUnicode CMap takes
 // precedence over its /Encoding entry (PDF 32000-1:2008, section 9.10.2):
 // the CMap remaps 'A' to 'Z' while /Encoding is WinAnsiEncoding, so
