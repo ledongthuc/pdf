@@ -87,26 +87,24 @@ func TestNewDictEncoderDefaultBaseIsStandard(t *testing.T) {
 // which StandardEncoding leaves undefined) keep their raw byte value
 // instead of becoming U+FFFD.
 func TestSymbolicFontDifferencesWithoutBaseEncoding(t *testing.T) {
-	font := Font{V: testValue(dict{
-		name("Type"):     name("Font"),
-		name("Subtype"):  name("TrueType"),
-		name("BaseFont"): name("ABCDEF+Wingdings"),
-		name("FontDescriptor"): dict{
-			name("Flags"): int64(4), // Symbolic
-		},
-		name("Encoding"): dict{
-			name("Differences"): array{int64(65), name("Alpha")},
-		},
-	})}
+	font := func(flags int64) *Font {
+		return &Font{V: testValue(dict{
+			name("Type"):           name("Font"),
+			name("Subtype"):        name("TrueType"),
+			name("BaseFont"):       name("ABCDEF+Wingdings"),
+			name("FontDescriptor"): dict{name("Flags"): flags},
+			name("Encoding"): dict{
+				name("Differences"): array{int64(65), name("Alpha")},
+			},
+		})}
+	}
 
-	if got, want := font.Encoder().Decode("A'\x80\x92\x9f"), "Α'\u0080\u0092\u009f"; got != want {
-		t.Fatalf("Decode = %q, want %q (Differences, then raw bytes)", got, want)
+	if got, want := font(4).Encoder().Decode("A'\x80\x92\x9f"), "Α'\u0080\u0092\u009f"; got != want {
+		t.Fatalf("symbolic Decode = %q, want %q (Differences, then raw bytes)", got, want)
 	}
 
 	// The same font flagged nonsymbolic uses StandardEncoding as its base.
-	font.V.data.(dict)[name("FontDescriptor")] = dict{name("Flags"): int64(32)}
-	font.enc = nil
-	if got, want := font.Encoder().Decode("A'\x80"), "Α’"+string(noRune); got != want {
+	if got, want := font(32).Encoder().Decode("A'\x80"), "Α’"+string(noRune); got != want {
 		t.Fatalf("nonsymbolic Decode = %q, want %q (StandardEncoding base)", got, want)
 	}
 
