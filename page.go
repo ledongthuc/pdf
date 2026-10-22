@@ -857,7 +857,10 @@ func (p Page) Content() Content {
 
 	var rect []Rect
 	var gstack []gstate
-	Interpret(strm, func(stk *Stack, op string) {
+	res := p.Resources()
+	formDepth := 0
+	var do func(stk *Stack, op string)
+	do = func(stk *Stack, op string) {
 		args := popArgs(stk)
 		switch op {
 		default:
@@ -865,6 +868,34 @@ func (p Page) Content() Content {
 			// 	fmt.Println(op, args)
 			// }
 			return
+
+		case "Do": // paint an XObject; the text drawn by a form XObject is part of the page
+			if len(args) != 1 || formDepth >= maxFormDepth {
+				return
+			}
+			x := res.Key("XObject").Key(args[0].Name())
+			if x.Key("Subtype").Name() != "Form" {
+				return
+			}
+			// The form runs in a saved graphics state, with its matrix concatenated to the CTM
+			savedG, savedRes, savedStack := g, res, gstack
+			if mv := x.Key("Matrix"); mv.Len() == 6 {
+				var m matrix
+				for i := 0; i < 6; i++ {
+					m[i/2][i%2] = mv.Index(i).Float64()
+				}
+				m[2][2] = 1
+				g.CTM = m.mul(g.CTM)
+			}
+			// A form without resources uses those of the content stream that paints it
+			if r := x.Key("Resources"); r.Kind() == Dict {
+				res = r
+			}
+			gstack = nil
+			formDepth++
+			Interpret(x, do)
+			formDepth--
+			g, res, gstack = savedG, savedRes, savedStack
 
 		case "cm": // update g.CTM
 			if len(args) != 6 {
@@ -947,7 +978,7 @@ func (p Page) Content() Content {
 				panic("bad TL")
 			}
 			f := args[0].Name()
-			g.Tf = p.Font(f)
+			g.Tf = Font{res.Key("Font").Key(f), nil}
 			enc = g.Tf.Encoder()
 			if enc == nil {
 				if DebugOn {
@@ -1034,9 +1065,14 @@ func (p Page) Content() Content {
 			}
 			g.Th = args[0].Float64() / 100
 		}
-	})
+	}
+	Interpret(strm, do)
 	return Content{text, rect}
 }
+
+// maxFormDepth bounds the nesting of form XObjects painted by Content, since
+// a form can paint itself, directly or through other forms.
+const maxFormDepth = 8
 
 // TextVertical implements sort.Interface for sorting
 // a slice of Text values in vertical order, top to bottom,
