@@ -255,7 +255,10 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream missing Size")
 	}
-	table := make([]xref, size)
+	// Do not eagerly pre-size the table from the attacker-controlled /Size:
+	// readXrefStreamData grows it incrementally via ensureXrefLen, so a bogus
+	// /Size no longer forces an unbounded allocation.
+	table := []xref(nil)
 
 	table, err := readXrefStreamData(r, strm, table, size)
 	if err != nil {
