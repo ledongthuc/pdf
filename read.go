@@ -137,8 +137,8 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (r *Reader,
 	}()
 
 	buf := make([]byte, 10)
-	f.ReadAt(buf, 0)
-	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' {
+	n, _ := f.ReadAt(buf, 0)
+	if !isHeader(buf[:n]) {
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
 	end := size
@@ -198,6 +198,22 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (r *Reader,
 		}
 	}
 	return nil, err
+}
+
+// isHeader reports whether buf starts with a PDF header: %PDF-1.0 to %PDF-1.7, or
+// %PDF-2.0 (ISO 32000-2, §7.5.2), followed by white space. That is usually the end
+// of the line, but some writers put a space or a NUL byte before it.
+func isHeader(buf []byte) bool {
+	if len(buf) < 9 || !bytes.HasPrefix(buf, []byte("%PDF-")) || buf[6] != '.' || !isSpace(buf[8]) {
+		return false
+	}
+	switch buf[5] {
+	case '1':
+		return '0' <= buf[7] && buf[7] <= '7'
+	case '2':
+		return buf[7] == '0'
+	}
+	return false
 }
 
 // Trailer returns the file's Trailer value.

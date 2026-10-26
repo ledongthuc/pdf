@@ -31,6 +31,52 @@ func TestNewReaderRejectsInvalidHeader(t *testing.T) {
 	}
 }
 
+// onePagePDF returns a PDF with one empty page that starts with header.
+func onePagePDF(header string) []byte {
+	var pdf bytes.Buffer
+	pdf.WriteString(header)
+	offsets := make([]int, 4)
+	for number, body := range []string{
+		1: "<< /Type /Catalog /Pages 2 0 R >>",
+		2: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		3: "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+	} {
+		if number > 0 {
+			offsets[number] = pdf.Len()
+			fmt.Fprintf(&pdf, "%d 0 obj\n%s\nendobj\n", number, body)
+		}
+	}
+	xrefOffset := pdf.Len()
+	pdf.WriteString("xref\n0 4\n0000000000 65535 f \n")
+	for number := 1; number <= 3; number++ {
+		fmt.Fprintf(&pdf, "%010d 00000 n \n", offsets[number])
+	}
+	fmt.Fprintf(&pdf, "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xrefOffset)
+	return pdf.Bytes()
+}
+
+// PDF 2.0 files start with %PDF-2.0, and some writers, such as tiff2pdf (#22),
+// put white space between the version and the end of the line.
+func TestNewReaderAcceptsHeaders(t *testing.T) {
+	for _, header := range []string{"%PDF-1.0\n", "%PDF-1.7\r\n", "%PDF-2.0\n", "%PDF-2.0\r", "%PDF-1.1 \n", "%PDF-1.2\x00\n"} {
+		data := onePagePDF(header)
+		r, err := NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			t.Errorf("header %q: %v", header, err)
+			continue
+		}
+		if n := r.NumPage(); n != 1 {
+			t.Errorf("header %q: NumPage = %d, want 1", header, n)
+		}
+	}
+	for _, header := range []string{"%PDF-1.8\n", "%PDF-2.1\n", "%PDF-1.\n", "%PDF-1.45\n"} {
+		data := onePagePDF(header)
+		if _, err := NewReader(bytes.NewReader(data), int64(len(data))); err == nil || !strings.Contains(err.Error(), "invalid header") {
+			t.Errorf("header %q: err = %v, want 'invalid header' error", header, err)
+		}
+	}
+}
+
 func TestNewReaderRejectsMissingEOF(t *testing.T) {
 	// Must be longer than the 100-byte EOF lookback chunk so the tail is
 	// actually read (NewReader reads the last 100 bytes).
