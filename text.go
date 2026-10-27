@@ -46,7 +46,10 @@ func isUTF16(s string) bool {
 
 func utf16Decode(s string) string {
 	var u []uint16
-	for i := 0; i < len(s); i += 2 {
+	// Not every caller can guarantee an even length: cmap replacement strings
+	// are taken verbatim from the file. A trailing odd byte cannot form a code
+	// unit, so drop it rather than reading past the end of s.
+	for i := 0; i+1 < len(s); i += 2 {
 		u = append(u, uint16(s[i])<<8|uint16(s[i+1]))
 	}
 	return string(utf16.Decode(u))
