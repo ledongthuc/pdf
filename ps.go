@@ -91,6 +91,11 @@ Reading:
 				}
 				do(&stk, string(kw))
 				continue
+			case "BI":
+				obj := b.readInlineImage()
+				stk.Push(Value{nil, objptr{}, obj})
+				do(&stk, string(kw))
+				continue
 			case "dict":
 				stk.Pop()
 				stk.Push(Value{nil, objptr{}, make(dict)})

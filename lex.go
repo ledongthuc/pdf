@@ -554,3 +554,49 @@ func isDelim(b byte) bool {
 	}
 	return false
 }
+
+func (b *buffer) readInlineImage() dict {
+	x := make(dict)
+	// read from BI's next token to ID
+	for {
+		tok := b.readToken()
+		if tok == nil || tok == keyword("ID") {
+			break
+		}
+		if tok == io.EOF {
+			tok = b.readToken()
+			break
+		}
+		n, ok := tok.(name)
+		if !ok {
+			if DebugOn {
+				fmt.Printf("DEBUG: %T(%v)\n. Skip dict", tok, tok)
+			}
+			b.errorf("unexpected non-name key %T(%v) parsing dictionary", tok, tok)
+			continue
+		}
+		x[n] = b.readObject()
+	}
+	// consume the single white-space character after "ID"
+	if c := b.readByte(); !isSpace(c) {
+		b.unreadByte()
+		return x
+	}
+
+	// read the raw image bytes of ID
+	tmp := b.tmp[:0]
+	for {
+		c := b.readByte()
+		if b.eof {
+			break
+		}
+		tmp = append(tmp, c)
+		if len(tmp) >= 3 && isSpace(tmp[len(tmp)-3]) && tmp[len(tmp)-2] == 'E' && tmp[len(tmp)-1] == 'I' {
+			tmp = tmp[:len(tmp)-3] // remove the trailing "\nEI"
+			break
+		}
+	}
+	x[name("ID")] = string(tmp)
+	b.tmp = tmp
+	return x
+}
