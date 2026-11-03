@@ -51,11 +51,17 @@ func pdfStream(dict, data string) string {
 // firstPageContent returns the Content of the first page of the PDF in data.
 func firstPageContent(t *testing.T, data []byte) Content {
 	t.Helper()
+	return firstPage(t, data).Content()
+}
+
+// firstPage returns the first page of the PDF in data.
+func firstPage(t *testing.T, data []byte) Page {
+	t.Helper()
 	r, err := NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
-	return r.Page(1).Content()
+	return r.Page(1)
 }
 
 // contentString concatenates the text of c.

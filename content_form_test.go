@@ -73,3 +73,73 @@ func TestContentImageXObject(t *testing.T) {
 		t.Errorf("text = %q, want %q", got, "A")
 	}
 }
+
+// TestXObjectContent verifies that a form XObject's text can be read directly
+// through Page.XObject and XObject.Content, with the form's /Matrix applied to
+// the glyph positions.
+func TestXObjectContent(t *testing.T) {
+	form := pdfStream("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 10 20]"+
+		" /Resources << /Font << /F1 5 0 R >> >>",
+		"BT /F1 12 Tf (Hi) Tj ET")
+	data := buildPagePDF("<< /XObject << /Fm1 6 0 R >> >>",
+		"q 1 0 0 1 100 200 cm /Fm1 Do Q",
+		helveticaFont, form)
+
+	p := firstPage(t, data)
+	if names := p.XObjects(); len(names) != 1 || names[0] != "Fm1" {
+		t.Fatalf("XObjects() = %v, want [Fm1]", names)
+	}
+	x := p.XObject("Fm1")
+	if !x.IsForm() {
+		t.Fatalf("IsForm() = false, want true")
+	}
+	c := x.Content()
+	if got := contentString(c); got != "Hi" {
+		t.Fatalf("text = %q, want %q", got, "Hi")
+	}
+	// Read directly the form uses its own space: only its /Matrix applies, not
+	// the page's cm, so the first glyph sits at the /Matrix translation (10, 20).
+	if gx, gy := c.Text[0].X, c.Text[0].Y; gx != 10 || gy != 20 {
+		t.Errorf("first glyph at (%v, %v), want (10, 20)", gx, gy)
+	}
+	if c.Text[0].Font != "Helvetica" {
+		t.Errorf("font = %q, want %q", c.Text[0].Font, "Helvetica")
+	}
+}
+
+// TestXObjectContentNonForm verifies that reading an image XObject directly
+// yields no text.
+func TestXObjectContentNonForm(t *testing.T) {
+	img := pdfStream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", "\x00")
+	data := buildPagePDF("<< /XObject << /Im1 6 0 R >> >>", "/Im1 Do", helveticaFont, img)
+
+	x := firstPage(t, data).XObject("Im1")
+	if x.IsForm() {
+		t.Fatalf("IsForm() = true, want false")
+	}
+	if got := contentString(x.Content()); got != "" {
+		t.Errorf("text = %q, want empty", got)
+	}
+}
+
+// TestXObjectNested verifies that a form's nested XObjects are reachable
+// through XObject.XObject / XObject.XObjects.
+func TestXObjectNested(t *testing.T) {
+	inner := pdfStream("/Type /XObject /Subtype /Form /BBox [0 0 100 100]"+
+		" /Resources << /Font << /F1 5 0 R >> >>",
+		"BT /F1 12 Tf (In) Tj ET")
+	outer := pdfStream("/Type /XObject /Subtype /Form /BBox [0 0 100 100]"+
+		" /Resources << /XObject << /Fm2 7 0 R >> >>",
+		"/Fm2 Do")
+	data := buildPagePDF("<< /XObject << /Fm1 6 0 R >> >>", "/Fm1 Do",
+		helveticaFont, outer, inner)
+
+	outerX := firstPage(t, data).XObject("Fm1")
+	if names := outerX.XObjects(); len(names) != 1 || names[0] != "Fm2" {
+		t.Fatalf("XObjects() = %v, want [Fm2]", names)
+	}
+	innerX := outerX.XObject("Fm2")
+	if got := contentString(innerX.Content()); got != "In" {
+		t.Errorf("nested text = %q, want %q", got, "In")
+	}
+}

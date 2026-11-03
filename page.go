@@ -160,6 +160,66 @@ func (p Page) fontCache() map[string]*Font {
 	return fonts
 }
 
+// XObjects returns the names of the XObjects in the page's resources.
+func (p Page) XObjects() []string {
+	return p.Resources().Key("XObject").Keys()
+}
+
+// XObject returns the XObject with the given name associated with the page.
+func (p Page) XObject(name string) XObject {
+	return XObject{p.Resources().Key("XObject").Key(name)}
+}
+
+// An XObject represents an external object in a PDF file, such as a form
+// XObject whose content stream can be interpreted like a Page.
+// The methods interpret an XObject dictionary stored in V.
+type XObject struct {
+	V Value
+}
+
+// Resources returns the resources dictionary associated with the XObject.
+// A form XObject may omit it, in which case the painting content stream's
+// resources are used (PDF 32000-1:2008 §8.10).
+func (x XObject) Resources() Value {
+	return x.V.Key("Resources")
+}
+
+// IsForm reports whether the XObject is a form XObject, i.e. a content stream
+// that can be interpreted like a page. Other subtypes, such as images, are not.
+func (x XObject) IsForm() bool {
+	return x.V.Key("Subtype").Name() == "Form"
+}
+
+// XObjects returns the names of the XObjects in the form's resources.
+func (x XObject) XObjects() []string {
+	return x.Resources().Key("XObject").Keys()
+}
+
+// XObject returns the XObject with the given name in the form's resources.
+func (x XObject) XObject(name string) XObject {
+	return XObject{x.Resources().Key("XObject").Key(name)}
+}
+
+// Content returns the content drawn by a form XObject's content stream: the
+// text and any drawn rectangles, in the form's own coordinate space with its
+// /Matrix applied. It returns an empty Content for a non-form XObject.
+func (x XObject) Content() Content {
+	if !x.IsForm() {
+		return Content{}
+	}
+	g := gstate{Th: 1, CTM: ident}
+	if mv := x.V.Key("Matrix"); mv.Len() == 6 {
+		var m matrix
+		for i := 0; i < 6; i++ {
+			m[i/2][i%2] = mv.Index(i).Float64()
+		}
+		m[2][2] = 1
+		g.CTM = m.mul(g.CTM)
+	}
+	text, rect := interpretContentStream(x.V, x.Resources(), g, 0)
+	return Content{text, rect}
+}
+
 // A Font represent a font in a PDF file.
 // The methods interpret a Font dictionary stored in V.
 type Font struct {
@@ -822,13 +882,18 @@ func (p Page) Content() Content {
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return Content{}
 	}
-	strm := p.V.Key("Contents")
-	var enc TextEncoding = &nopEncoder{}
+	g := gstate{Th: 1, CTM: ident}
+	text, rect := interpretContentStream(p.V.Key("Contents"), p.Resources(), g, 0)
+	return Content{text, rect}
+}
 
-	var g = gstate{
-		Th:  1,
-		CTM: ident,
-	}
+// interpretContentStream walks a content stream, accumulating the text and
+// drawn rectangles it produces. It is shared by Page.Content and
+// XObject.Content: res supplies the fonts and nested XObjects, g is the initial
+// graphics state (text matrix, CTM, ...), and formDepth bounds the recursion
+// into form XObjects painted by the Do operator.
+func interpretContentStream(strm, res Value, g gstate, formDepth int) ([]Text, []Rect) {
+	var enc TextEncoding = &nopEncoder{}
 
 	var text []Text
 	showText := func(s string) {
@@ -857,8 +922,6 @@ func (p Page) Content() Content {
 
 	var rect []Rect
 	var gstack []gstate
-	res := p.Resources()
-	formDepth := 0
 	var do func(stk *Stack, op string)
 	do = func(stk *Stack, op string) {
 		args := popArgs(stk)
@@ -873,29 +936,28 @@ func (p Page) Content() Content {
 			if len(args) != 1 || formDepth >= maxFormDepth {
 				return
 			}
-			x := res.Key("XObject").Key(args[0].Name())
-			if x.Key("Subtype").Name() != "Form" {
+			x := XObject{res.Key("XObject").Key(args[0].Name())}
+			if !x.IsForm() {
 				return
 			}
 			// The form runs in a saved graphics state, with its matrix concatenated to the CTM
-			savedG, savedRes, savedStack := g, res, gstack
-			if mv := x.Key("Matrix"); mv.Len() == 6 {
+			formG := g
+			if mv := x.V.Key("Matrix"); mv.Len() == 6 {
 				var m matrix
 				for i := 0; i < 6; i++ {
 					m[i/2][i%2] = mv.Index(i).Float64()
 				}
 				m[2][2] = 1
-				g.CTM = m.mul(g.CTM)
+				formG.CTM = m.mul(formG.CTM)
 			}
 			// A form without resources uses those of the content stream that paints it
-			if r := x.Key("Resources"); r.Kind() == Dict {
-				res = r
+			formRes := res
+			if r := x.Resources(); r.Kind() == Dict {
+				formRes = r
 			}
-			gstack = nil
-			formDepth++
-			Interpret(x, do)
-			formDepth--
-			g, res, gstack = savedG, savedRes, savedStack
+			t, rc := interpretContentStream(x.V, formRes, formG, formDepth+1)
+			text = append(text, t...)
+			rect = append(rect, rc...)
 
 		case "cm": // update g.CTM
 			if len(args) != 6 {
@@ -1067,7 +1129,7 @@ func (p Page) Content() Content {
 		}
 	}
 	Interpret(strm, do)
-	return Content{text, rect}
+	return text, rect
 }
 
 // maxFormDepth bounds the nesting of form XObjects painted by Content, since
