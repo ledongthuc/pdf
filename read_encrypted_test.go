@@ -39,3 +39,37 @@ func TestReads40BitRC4WithEmptyUserPassword(t *testing.T) {
 		})
 	}
 }
+
+// A one-line page encrypted by pikepdf (QPDF) with 128-bit RC4 via the V4
+// crypt-filter syntax (/V 4 /R 4 /CFM V2 /EncryptMetadata false) and an empty
+// user password. Commercial e-book rips commonly use this shape: the document
+// opens without a password in mainstream viewers, but NewReader used to reject
+// it as "unsupported PDF: encryption version V=4" because okayV4 only accepted
+// CFM /AESV2. With EncryptMetadata false, Algorithm 2 must also append the
+// 4 bytes FFFFFFFF to the MD5 input (PDF 32000-1:2008 §7.6.3.4) or every
+// empty-password verification fails.
+func TestReadsV4CryptFilterRC4WithEmptyUserPassword(t *testing.T) {
+	f, err := os.Open("testdata/rc4-v4.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	st, _ := f.Stat()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("reader panicked: %v", r)
+		}
+	}()
+	r, err := NewReaderEncrypted(f, st.Size(), func() string { return "" })
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	text, err := r.Page(1).GetPlainText(nil)
+	if err != nil {
+		t.Fatalf("page text: %v", err)
+	}
+	if !strings.Contains(text, "v4 cfm v2 rc4 fixture line") {
+		t.Fatalf("page text %q does not carry the line", text)
+	}
+}
