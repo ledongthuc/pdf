@@ -1011,6 +1011,14 @@ func (r *Reader) initEncrypt(password string) error {
 	h.Write([]byte(O))
 	h.Write([]byte{byte(P), byte(P >> 8), byte(P >> 16), byte(P >> 24)})
 	h.Write([]byte(ID))
+	// PDF 32000-1:2008 §7.6.3.4 (Algorithm 2): for security handlers of
+	// revision 4 or greater, when EncryptMetadata is false the MD5 input
+	// gains four bytes of 0xFF. Without this, every empty-user-password
+	// verification fails on writers that leave metadata in the clear
+	// (pikepdf/QPDF default).
+	if em, ok := encrypt["EncryptMetadata"].(bool); R >= 4 && ok && !em {
+		h.Write([]byte{0xff, 0xff, 0xff, 0xff})
+	}
 	key := h.Sum(nil)
 
 	keyLen := int(n / 8) // encryption key length in bytes
@@ -1058,7 +1066,19 @@ func (r *Reader) initEncrypt(password string) error {
 	}
 
 	r.key = key
-	r.useAES = V == 4
+	// With V4 the cipher is chosen by the crypt filter (/CF/CFM):
+	// V2 = RC4, AESV2 = AES. V == 4 alone does not imply AES, or RC4
+	// ciphertext gets "decrypted" with AES into garbage.
+	r.useAES = false
+	if V == 4 {
+		if cf, ok := encrypt["CF"].(dict); ok {
+			if stmf, ok := encrypt["StmF"].(name); ok {
+				if cfparam, ok := cf[stmf].(dict); ok {
+					r.useAES = cfparam["CFM"] == name("AESV2")
+				}
+			}
+		}
+	}
 
 	return nil
 }
@@ -1091,7 +1111,10 @@ func okayV4(encrypt dict) bool {
 	if cfparam["Length"] != nil && cfparam["Length"] != int64(16) {
 		return false
 	}
-	if cfparam["CFM"] != name("AESV2") {
+	if cfm := cfparam["CFM"]; cfm != name("AESV2") && cfm != name("V2") {
+		// CFM V2 (RC4-128 via crypt filter) is as readable as the V1/V2
+		// spellings: pdfcpu and commercial rips write this shape, and the
+		// RC4 decryption path already exists (useAES = false).
 		return false
 	}
 	return true

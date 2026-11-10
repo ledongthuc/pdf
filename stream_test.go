@@ -153,13 +153,22 @@ func TestOkayV4(t *testing.T) {
 	if okayV4(dict{name("StmF"): name("A"), name("StrF"): name("B")}) {
 		t.Fatal("okayV4 should reject StmF != StrF")
 	}
-	badCFM := dict{
+	// CFM V2 (RC4-128) is accepted alongside AESV2; unknown CFMs stay out.
+	rc4CFM := dict{
 		name("CF"):   dict{name("StdCF"): dict{name("CFM"): name("V2"), name("Length"): int64(16)}},
 		name("StmF"): name("StdCF"),
 		name("StrF"): name("StdCF"),
 	}
+	if !okayV4(rc4CFM) {
+		t.Fatal("okayV4 should accept CFM V2 (RC4)")
+	}
+	badCFM := dict{
+		name("CF"):   dict{name("StdCF"): dict{name("CFM"): name("AESV3"), name("Length"): int64(16)}},
+		name("StmF"): name("StdCF"),
+		name("StrF"): name("StdCF"),
+	}
 	if okayV4(badCFM) {
-		t.Fatal("okayV4 should reject CFM != AESV2")
+		t.Fatal("okayV4 should reject CFM != AESV2/V2")
 	}
 	badLength := dict{
 		name("CF"):   dict{name("StdCF"): dict{name("CFM"): name("AESV2"), name("Length"): int64(8)}},
