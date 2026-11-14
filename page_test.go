@@ -36,6 +36,17 @@ func TestUcs2Encoder(t *testing.T) {
 	}
 }
 
+func TestGBKEncoder(t *testing.T) {
+	e := newGBKEncoder()
+	raw := []byte{0xcd, 0xa8, 0xd3, 0xc3} // cda8d3c3
+	text := e.Decode(string(raw))
+
+	const want = "通用"
+	if text != want {
+		t.Errorf("got %q, want %q", text, want)
+	}
+}
+
 func TestNopEncoder(t *testing.T) {
 	e := &nopEncoder{}
 	if got := e.Decode("abc"); got != "abc" {
