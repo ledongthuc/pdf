@@ -883,6 +883,8 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 		case 12:
 			return &pngUpReader{r: zr, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}
 		}
+	case "DCTDecode":
+		return rd
 	case "ASCII85Decode":
 		cleanASCII85 := newAlphaReader(rd)
 		decoder := ascii85.NewDecoder(cleanASCII85)
