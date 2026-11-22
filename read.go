@@ -68,6 +68,7 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/ascii85"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -790,6 +791,8 @@ type errorReadCloser struct {
 	err error
 }
 
+var errStreamNotPresent = errors.New("stream not present")
+
 func (e *errorReadCloser) Read([]byte) (int, error) {
 	return 0, e.err
 }
@@ -804,7 +807,7 @@ func (e *errorReadCloser) Close() error {
 func (v Value) Reader() io.ReadCloser {
 	x, ok := v.data.(stream)
 	if !ok {
-		return &errorReadCloser{fmt.Errorf("stream not present")}
+		return &errorReadCloser{errStreamNotPresent}
 	}
 	var rd io.Reader
 	rd = io.NewSectionReader(v.r.f, x.offset, v.Key("Length").Int64())

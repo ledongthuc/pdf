@@ -7,7 +7,6 @@
 package pdf
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -88,11 +87,7 @@ func (b *buffer) reload() bool {
 	if n == 0 && err != nil {
 		b.buf = b.buf[:0]
 		b.pos = 0
-		if errors.Is(err, fmt.Errorf("stream not present")) {
-			b.eof = true
-			return false
-		}
-		if b.allowEOF && err == io.EOF {
+		if b.allowEOF && (err == io.EOF || err == errStreamNotPresent) {
 			b.eof = true
 			return false
 		}
