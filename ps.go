@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"errors"
 	"io"
 	"runtime"
 )
@@ -68,9 +69,9 @@ func Interpret(strm Value, do func(stk *Stack, op string)) {
 
 // contentReader concatenates streams without inserting token separators. It owns
 // at most one open reader, releasing it before opening its successor. Close also
-// releases that reader on early interpreter exit. Value.Reader currently returns
-// a no-op closer, so dropping the reference makes its decoder chain collectible;
-// this is a bound on retained readers, not on process RSS or GC timing.
+// releases that reader on early interpreter exit. Value.Reader closes its filter
+// chain, including LZW and zlib decoders. Dropping the reference makes that chain
+// collectible; this bounds retained readers, not process RSS or GC timing.
 // Close errors are ignored, as they were by Interpret before reader ownership.
 type contentReader struct {
 	count, next int
@@ -219,6 +220,9 @@ func readObjectRecover(b *buffer) (obj object, ok bool) {
 			// deref, index out of range, ...) is a genuine bug and must not
 			// be silently swallowed as malformed input.
 			if _, isRuntime := r.(runtime.Error); isRuntime {
+				panic(r)
+			}
+			if err, ok := r.(error); ok && errors.Is(err, ErrStreamLimit) {
 				panic(r)
 			}
 			obj, ok = nil, false
