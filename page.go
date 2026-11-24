@@ -604,7 +604,7 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		case "BT": // add a space between text objects
 			showText("\n")
 		case "T*": // move to start of next line
-			showEncodedText("\n")
+			showText("\n")
 		case "Tf": // set text font and size
 			if len(args) != 2 {
 				panic("bad TL")
