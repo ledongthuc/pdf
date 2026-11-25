@@ -25,8 +25,14 @@ type Page struct {
 func (r *Reader) Page(num int) Page {
 	num-- // now 0-indexed
 	page := r.Trailer().Key("Root").Key("Pages")
+	depth := 0
 Search:
 	for page.Key("Type").Name() == "Pages" {
+		// A Pages node that lists itself, or an ancestor, among its kids
+		// would be walked forever.
+		if depth++; depth > maxPageTreeDepth {
+			return Page{}
+		}
 		count := int(page.Key("Count").Int64())
 		if count < num {
 			return Page{}
@@ -113,8 +119,14 @@ func (r *Reader) GetStyledTexts() (sentences []Text, err error) {
 	return sentences, err
 }
 
+// maxPageTreeDepth bounds the walks of the page tree: down its Kids and
+// up its Parent links. Real documents are a few levels deep.
+const maxPageTreeDepth = 64
+
 func (p Page) findInherited(key string) Value {
-	for v := p.V; !v.IsNull(); v = v.Key("Parent") {
+	depth := 0
+	for v := p.V; !v.IsNull() && depth < maxPageTreeDepth; v = v.Key("Parent") {
+		depth++
 		if r := v.Key(key); !r.IsNull() {
 			return r
 		}
