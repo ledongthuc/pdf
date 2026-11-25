@@ -222,11 +222,18 @@ func readXref(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 // positioned at the start of each previous section and must return that
 // section's own /Prev entry (or nil) to continue the chain.
 func readPrevXrefs(r *Reader, first object, parse func(b *buffer) (object, error)) error {
+	seen := map[int64]bool{}
 	for prev := first; prev != nil; {
 		off, ok := prev.(int64)
 		if !ok {
 			return fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prev)
 		}
+		// A /Prev that points back to a section already read would loop
+		// forever: refuse the file instead.
+		if seen[off] || len(seen) >= maxXrefSections {
+			return fmt.Errorf("malformed PDF: xref Prev chain loops or is too long")
+		}
+		seen[off] = true
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		next, err := parse(b)
 		if err != nil {
@@ -236,6 +243,12 @@ func readPrevXrefs(r *Reader, first object, parse func(b *buffer) (object, error
 	}
 	return nil
 }
+
+// maxXrefSections bounds the /Prev chain of cross-reference sections.
+const maxXrefSections = 1024
+
+// maxObjStmExtends bounds the /Extends chain of object streams.
+const maxObjStmExtends = 64
 
 func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	obj1 := b.readObject()
@@ -752,9 +765,19 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 		}
 		var obj object
 		if xref.inStream {
+			// An object stream cannot itself be stored in an object stream
+			// (PDF 32000-1, 7.5.7); following one that is would recurse
+			// without end and overflow the stack.
+			if s := xref.stream; s.id >= uint32(len(r.xref)) || r.xref[s.id].inStream {
+				return Value{}
+			}
 			strm := r.resolve(parent, xref.stream)
+			hops := 0
 		Search:
 			for {
+				if hops++; hops > maxObjStmExtends {
+					panic("object stream Extends chain loops or is too long")
+				}
 				if strm.Kind() != Stream {
 					panic("not a stream")
 				}
