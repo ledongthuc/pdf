@@ -1104,7 +1104,14 @@ func cryptKey(key []byte, useAES bool, ptr objptr) []byte {
 	if useAES {
 		h.Write([]byte("sAlT"))
 	}
-	return h.Sum(nil)
+	// PDF 32000-1:2008 Algorithm 1 step e: the object key is the first
+	// min(n/8+5, 16) bytes of the digest. Returning the whole digest is only
+	// right for a 128-bit key; a 40-bit key needs 10 bytes.
+	n := len(key) + 5
+	if n > 16 {
+		n = 16
+	}
+	return h.Sum(nil)[:n]
 }
 
 func decryptString(key []byte, useAES bool, ptr objptr, x string) string {
