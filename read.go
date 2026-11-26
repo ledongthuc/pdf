@@ -399,6 +399,7 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref table not followed by trailer dictionary")
 	}
+	table = readXrefStm(r, trailer, table)
 
 	err = readPrevXrefs(r, trailer["Prev"], func(b *buffer) (object, error) {
 		if tok := b.readToken(); tok != keyword("xref") {
@@ -413,6 +414,7 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		if !ok {
 			return nil, fmt.Errorf("malformed PDF: xref Prev table not followed by trailer dictionary")
 		}
+		table = readXrefStm(r, prevTrailer, table)
 		return prevTrailer["Prev"], nil
 	})
 	if err != nil {
@@ -429,6 +431,39 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	}
 
 	return table, objptr{}, trailer, nil
+}
+
+// readXrefStm adds the entries of the cross-reference stream that the trailer
+// of a hybrid-reference file names with /XRefStm. Its table leaves out the
+// objects in object streams, or lists them as free, so that readers without
+// cross-reference streams skip them (PDF 32000-1:2008, §7.5.8.4). The table
+// still describes the rest of the file, so it is kept as it is when the stream
+// cannot be read.
+func readXrefStm(r *Reader, trailer dict, table []xref) (out []xref) {
+	off, ok := trailer["XRefStm"].(int64)
+	if !ok {
+		return table
+	}
+	defer func() {
+		if recover() != nil {
+			out = table
+		}
+	}()
+	b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
+	def, ok := b.readObject().(objdef)
+	if !ok {
+		return table
+	}
+	strm, ok := def.obj.(stream)
+	if !ok || strm.hdr["Type"] != name("XRef") {
+		return table
+	}
+	size, _ := strm.hdr["Size"].(int64)
+	merged, err := readXrefStreamData(r, strm, append([]xref(nil), table...), size)
+	if err != nil {
+		return table
+	}
+	return merged
 }
 
 func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
@@ -451,7 +486,7 @@ func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 			}
 			x := int(start) + i
 			table = ensureXrefLen(table, x)
-			if alloc == "n" && table[x].offset == 0 {
+			if alloc == "n" && table[x].ptr == (objptr{}) {
 				table[x] = xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)}
 			}
 		}
