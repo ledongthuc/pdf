@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"errors"
 	"io"
 	"runtime"
 )
@@ -54,19 +55,66 @@ func newDict() Value {
 //
 // There is no support for executable blocks, among other limitations.
 func Interpret(strm Value, do func(stk *Stack, op string)) {
-	var stk Stack
-	var dicts []dict
-	var rd io.Reader
+	var rd io.ReadCloser
 	if strm.Kind() == Array {
-		readers := make([]io.Reader, 0, strm.Len())
-		for i := 0; i < strm.Len(); i++ {
-			readers = append(readers, strm.Index(i).Reader())
+		rd = &contentReader{
+			count: strm.Len(),
+			open:  func(i int) io.ReadCloser { return strm.Index(i).Reader() },
 		}
-		rd = io.MultiReader(readers...)
 	} else {
 		rd = strm.Reader()
 	}
+	interpretReader(rd, do)
+}
 
+// contentReader concatenates streams without inserting token separators. It owns
+// at most one open reader, releasing it before opening its successor. Close also
+// releases that reader on early interpreter exit. Value.Reader closes its filter
+// chain, including LZW and zlib decoders. Dropping the reference makes that chain
+// collectible; this bounds retained readers, not process RSS or GC timing.
+// Close errors are ignored, as they were by Interpret before reader ownership.
+type contentReader struct {
+	count, next int
+	open        func(int) io.ReadCloser
+	current     io.ReadCloser
+}
+
+func (r *contentReader) Read(p []byte) (int, error) {
+	for r.current != nil || r.next < r.count {
+		if r.current == nil {
+			r.current = r.open(r.next)
+			r.next++
+		}
+		n, err := r.current.Read(p)
+		if err == io.EOF {
+			r.current.Close()
+			r.current = nil
+			if n == 0 {
+				continue
+			}
+			if r.next < r.count {
+				err = nil
+			}
+		}
+		return n, err
+	}
+	return 0, io.EOF
+}
+
+func (r *contentReader) Close() error {
+	r.next = r.count
+	r.open = nil
+	if r.current != nil {
+		r.current.Close()
+		r.current = nil
+	}
+	return nil
+}
+
+func interpretReader(rd io.ReadCloser, do func(stk *Stack, op string)) {
+	defer rd.Close()
+	var stk Stack
+	var dicts []dict
 	b := newBuffer(rd, 0)
 	b.allowEOF = true
 	b.allowObjptr = false
@@ -172,6 +220,9 @@ func readObjectRecover(b *buffer) (obj object, ok bool) {
 			// deref, index out of range, ...) is a genuine bug and must not
 			// be silently swallowed as malformed input.
 			if _, isRuntime := r.(runtime.Error); isRuntime {
+				panic(r)
+			}
+			if err, ok := r.(error); ok && errors.Is(err, ErrStreamLimit) {
 				panic(r)
 			}
 			obj, ok = nil, false

@@ -556,7 +556,11 @@ func popArgs(stk *Stack) []Value {
 func recoverTo(err *error, reset func()) {
 	if r := recover(); r != nil {
 		reset()
-		*err = errors.New(fmt.Sprint(r))
+		if e, ok := r.(error); ok {
+			*err = e
+		} else {
+			*err = errors.New(fmt.Sprint(r))
+		}
 	}
 }
 
